@@ -2,6 +2,13 @@
 
 All notable changes to HeatLens are documented here.
 
+## [0.1.4] - 2026-07-10
+
+### Added
+- Portable **Windows `.exe`** and **Linux binary** builds via PyInstaller
+- `scripts/build_windows.ps1` and `scripts/build_linux.sh` for local builds
+- GitHub Actions workflow to attach binaries to tagged releases
+
 ## [0.1.3] - 2026-07-10
 
 ### Fixed

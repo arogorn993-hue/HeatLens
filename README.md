@@ -27,7 +27,30 @@ It shows total wattage, heat dissipation in **BTU/hr**, session heat in **BTU**,
 
 ## Quick start
 
-### Windows
+### Portable download (no Python required)
+
+Pre-built binaries are attached to [GitHub Releases](https://github.com/arogorn993-hue/HeatLens/releases):
+
+| Platform | File | Notes |
+|----------|------|-------|
+| **Windows** | `HeatLens.exe` | Double-click to run. Right-click → **Run as administrator** for extra ACPI/storage sensors. |
+| **Linux** | `HeatLens` or `HeatLens-linux-x86_64.tar.gz` | `chmod +x HeatLens && ./HeatLens`. Needs X11/Wayland with Tk; RAPL/hwmon may need permissions. |
+
+Place `LibreHardwareMonitor.exe` in the **same folder** as `HeatLens.exe` on Windows if you want the **Libre** button to find it easily.
+
+To build locally:
+
+```powershell
+# Windows
+.\scripts\build_windows.ps1
+```
+
+```bash
+# Linux
+bash scripts/build_linux.sh
+```
+
+### Windows (from source)
 
 ```powershell
 git clone https://github.com/arogorn993-hue/HeatLens.git

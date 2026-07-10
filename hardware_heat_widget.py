@@ -28,7 +28,7 @@ from tkinter import filedialog, messagebox, ttk
 
 
 APP_NAME = "HeatLens"
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.4"
 POLL_INTERVAL_SECONDS = 1.5
 # 1 W = 3.412141633 BTU/hr (ISO 80000-5 / NIST); same factor converts Wh -> BTU.
 WATTS_TO_BTU_PER_HOUR = 3.412141633
