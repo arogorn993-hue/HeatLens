@@ -103,3 +103,33 @@ jobs:
             artifacts/HeatLens-macos-arm64/HeatLens-macos-*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-milestone-releases:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/tags/v0.1.6'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish v0.1.2
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.2
+          name: HeatLens 0.1.2
+          target_commitish: 30fbf12fe432628525371d07f69e25a27c66ad41
+          body_path: .github/RELEASE_v0.1.2.md
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish v0.1.3
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.3
+          name: HeatLens 0.1.3
+          target_commitish: 906f533b134f9ea3c467824d4a43922be7e64a7f
+          body_path: .github/RELEASE_v0.1.3.md
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
