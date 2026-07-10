@@ -1,0 +1,20 @@
+#!/bin/sh
+# Strip Cursor co-author trailers so GitHub does not list Cursor as a contributor.
+COMMIT_MSG_FILE=$1
+py -3 - "$COMMIT_MSG_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    text = path.read_text(encoding="utf-8")
+except Exception:
+    raise SystemExit(0)
+
+lines = [
+    line
+    for line in text.splitlines(True)
+    if "Co-authored-by: Cursor" not in line and "cursoragent@cursor.com" not in line
+]
+path.write_text("".join(lines), encoding="utf-8")
+PY
