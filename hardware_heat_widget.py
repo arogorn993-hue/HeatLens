@@ -28,8 +28,35 @@ from tkinter import filedialog, messagebox, ttk
 
 
 APP_NAME = "HeatLens"
-APP_VERSION = "0.1.5"
+APP_VERSION = "0.1.6"
 POLL_INTERVAL_SECONDS = 1.5
+GRAPH_X_WINDOW_LABELS: tuple[str, ...] = (
+    "Auto",
+    "1 minute",
+    "3 minutes",
+    "5 minutes",
+    "10 minutes",
+    "30 minutes",
+)
+GRAPH_Y_SCALE_LABELS: tuple[str, ...] = (
+    "Auto",
+    "Include zero",
+    "Padded (10%)",
+)
+GRAPH_X_WINDOW_SECONDS: dict[str, Optional[float]] = {
+    "Auto": None,
+    "1 minute": 60.0,
+    "3 minutes": 180.0,
+    "5 minutes": 300.0,
+    "10 minutes": 600.0,
+    "30 minutes": 1800.0,
+}
+GRAPH_Y_SCALE_MODES: dict[str, str] = {
+    "Auto": "auto",
+    "Include zero": "zero",
+    "Padded (10%)": "padded",
+}
+PREF_ALWAYS_START_AS_ADMIN = "always_start_as_admin"
 # 1 W = 3.412141633 BTU/hr (ISO 80000-5 / NIST); same factor converts Wh -> BTU.
 WATTS_TO_BTU_PER_HOUR = 3.412141633
 DEFAULT_AMBIENT_TEMP_F = 72.0
@@ -134,6 +161,51 @@ def is_live_temperature_reading(name: str, identifier: str) -> bool:
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def is_windows_admin() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def launch_heatlens_elevated() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        if getattr(sys, "frozen", False):
+            executable = sys.executable
+            params = ""
+            directory = str(Path(executable).resolve().parent)
+        else:
+            executable = sys.executable
+            script = Path(__file__).resolve()
+            params = f'"{script}"'
+            directory = str(script.parent)
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            executable,
+            params or None,
+            directory,
+            1,
+        )
+    except Exception:
+        return False
+    return int(result) > 32
+
+
+def maybe_elevate_on_startup() -> bool:
+    """Launch an elevated copy on Windows when requested. Returns True if this process should exit."""
+    if sys.platform != "win32" or is_windows_admin():
+        return False
+    preferences = HeatLensPreferences()
+    if not preferences.get_bool(PREF_ALWAYS_START_AS_ADMIN, False):
+        return False
+    return launch_heatlens_elevated()
 
 
 def fahrenheit_to_celsius(value: float) -> float:
@@ -266,6 +338,11 @@ def format_temp(celsius: Optional[float]) -> str:
         return "--"
     fahrenheit = celsius_to_fahrenheit(celsius)
     return f"{celsius:.0f} C / {fahrenheit:.0f} F"
+
+
+def format_graph_time(timestamp: float, *, include_seconds: bool = False) -> str:
+    pattern = "%I:%M:%S %p" if include_seconds else "%I:%M %p"
+    return datetime.fromtimestamp(timestamp).strftime(pattern).lstrip("0")
 
 
 def bus_type_label(value: Optional[float]) -> str:
@@ -2484,17 +2561,79 @@ class GraphPanel(tk.Frame):
             font=("Segoe UI", 12, "bold"),
             anchor="w",
         ).grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 0))
-        self.canvas = tk.Canvas(self, bg=COLORS["panel"], highlightthickness=0, height=230)
+        self.canvas = tk.Canvas(self, bg=COLORS["panel"], highlightthickness=0, height=248)
         self.canvas.grid(row=1, column=0, sticky="nsew", padx=10, pady=(4, 10))
         self.canvas.bind("<Configure>", lambda _event: self.redraw())
-        self.history: deque[dict[str, Optional[float]]] = deque(maxlen=240)
+        self.history: deque[dict[str, object]] = deque(maxlen=2000)
+        self.show_time = True
+        self.x_window_seconds: Optional[float] = None
+        self.y_scale_mode = "auto"
 
-    def add_sample(self, watts: float, btu_per_hour: float, max_temp: Optional[float]) -> None:
+    def apply_options(
+        self,
+        *,
+        show_time: bool,
+        x_window_seconds: Optional[float],
+        y_scale_mode: str,
+    ) -> None:
+        self.show_time = show_time
+        self.x_window_seconds = x_window_seconds
+        self.y_scale_mode = y_scale_mode
+        self.redraw()
+
+    def set_show_time(self, enabled: bool) -> None:
+        self.show_time = enabled
+        self.redraw()
+
+    def _visible_samples(self) -> list[dict[str, object]]:
+        if not self.history:
+            return []
+        samples = list(self.history)
+        if self.x_window_seconds is None:
+            return samples
+        cutoff = time.time() - self.x_window_seconds
+        return [sample for sample in samples if float(sample["ts"]) >= cutoff]
+
+    def _value_bounds(self, values: list[float], key: str, unit: str) -> tuple[float, float]:
+        low = min(values)
+        high = max(values)
+        if math.isclose(low, high):
+            padding = 1.0 if unit == "C" else max(1.0, abs(high) * 0.05)
+            low = low - padding if key == "temp" else max(0.0, low - padding)
+            high += padding
+
+        if self.y_scale_mode == "zero" and key in ("watts", "btu"):
+            low = 0.0
+            if high <= 0.0:
+                high = 10.0
+        elif self.y_scale_mode == "padded":
+            span = high - low
+            padding = span * 0.10 if span > 0 else (1.0 if unit == "C" else max(1.0, abs(high) * 0.1))
+            low -= padding
+            high += padding
+            if key in ("watts", "btu"):
+                low = max(0.0, low)
+        elif self.y_scale_mode == "zero" and key == "temp":
+            span = high - low
+            padding = max(1.0, span * 0.08)
+            low -= padding
+            high += padding
+
+        return low, high
+
+    def add_sample(
+        self,
+        watts: float,
+        btu_per_hour: float,
+        max_temp: Optional[float],
+        timestamp: Optional[float] = None,
+    ) -> None:
         self.history.append(
             {
                 "watts": watts,
                 "btu": btu_per_hour,
                 "temp": max_temp,
+                "ts": timestamp if timestamp is not None else time.time(),
             }
         )
         self.redraw()
@@ -2508,7 +2647,9 @@ class GraphPanel(tk.Frame):
         right_pad = 16
         top_pad = 8
         band_gap = 10
-        band_height = (height - top_pad * 2 - band_gap * 2) / 3.0
+        time_axis_h = 40 if self.show_time else 0
+        plot_height = height - top_pad - time_axis_h
+        band_height = (plot_height - band_gap * 2) / 3.0
 
         bands = [
             ("watts", "Watts", "W", COLORS["green"]),
@@ -2519,6 +2660,68 @@ class GraphPanel(tk.Frame):
         for index, (key, label, unit, color) in enumerate(bands):
             y = top_pad + index * (band_height + band_gap)
             self._draw_band(canvas, key, label, unit, color, pad_x, y, width - right_pad, band_height)
+
+        if self.show_time:
+            self._draw_time_axis(canvas, pad_x, width - right_pad, top_pad + plot_height, time_axis_h)
+
+    def _draw_time_axis(
+        self,
+        canvas: tk.Canvas,
+        left: float,
+        right: float,
+        top: float,
+        axis_height: float,
+    ) -> None:
+        line_y = top + 10
+        label_y = top + axis_height - 6
+        canvas.create_line(left, line_y, right, line_y, fill=COLORS["grid"])
+
+        if not self.history:
+            canvas.create_text(
+                (left + right) / 2,
+                label_y,
+                text="Time",
+                fill=COLORS["muted"],
+                font=("Segoe UI", 9),
+                anchor="s",
+            )
+            return
+
+        visible = self._visible_samples()
+        timestamps = [float(sample["ts"]) for sample in visible]
+        if not timestamps:
+            return
+        span = timestamps[-1] - timestamps[0] if len(timestamps) > 1 else 0.0
+        include_seconds = span < 120.0
+        plot_width = right - left
+        tick_count = 3 if plot_width < 420 else 5 if plot_width < 700 else 7
+        tick_count = min(tick_count, len(timestamps))
+        if tick_count < 2:
+            tick_count = len(timestamps)
+
+        if tick_count == 1:
+            positions = [0.0]
+        else:
+            positions = [index / (tick_count - 1) for index in range(tick_count)]
+
+        seen_labels: set[str] = set()
+        for position in positions:
+            index = int(round(position * (len(timestamps) - 1)))
+            index = clamp(index, 0, len(timestamps) - 1)
+            x = left + position * (right - left)
+            label = format_graph_time(timestamps[index], include_seconds=include_seconds)
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+            canvas.create_line(x, line_y - 5, x, line_y + 5, fill=COLORS["muted"])
+            canvas.create_text(
+                x,
+                label_y,
+                text=label,
+                fill=COLORS["text"],
+                font=("Segoe UI", 9),
+                anchor="s",
+            )
 
     def _draw_band(
         self,
@@ -2534,11 +2737,9 @@ class GraphPanel(tk.Frame):
     ) -> None:
         bottom = top + height
         canvas.create_rectangle(left, top, right, bottom, fill=COLORS["bg"], outline=COLORS["grid"])
-        for tick in range(1, 3):
-            y = top + height * tick / 3.0
-            canvas.create_line(left, y, right, y, fill=COLORS["grid"])
 
-        values = [sample[key] for sample in self.history if sample[key] is not None]
+        visible = self._visible_samples()
+        values = [float(sample[key]) for sample in visible if sample.get(key) is not None]
         current = values[-1] if values else None
         current_text = self._format_axis_value(current, unit)
         canvas.create_text(
@@ -2568,19 +2769,36 @@ class GraphPanel(tk.Frame):
             )
             return
 
-        low = min(values)
-        high = max(values)
-        if math.isclose(low, high):
-            low = max(0.0, low - 1.0)
-            high += 1.0
+        low, high = self._value_bounds(values, key, unit)
 
-        samples = [sample[key] for sample in self.history]
+        plot_top = top + 5
+        plot_bottom = bottom - 5
+        plot_height = plot_bottom - plot_top
+
+        for fraction in (1.0 / 3.0, 2.0 / 3.0):
+            grid_y = plot_top + fraction * plot_height
+            canvas.create_line(left, grid_y, right, grid_y, fill=COLORS["grid"])
+
+        for fraction in (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0):
+            grid_value = high - fraction * (high - low)
+            grid_y = plot_top + fraction * plot_height
+            canvas.create_text(
+                right - 6,
+                grid_y,
+                text=self._format_grid_value(grid_value, unit),
+                fill=COLORS["muted"],
+                font=("Segoe UI", 8),
+                anchor="e",
+            )
+
+        samples = [sample.get(key) for sample in visible]
         x_step = (right - left) / max(1, len(samples) - 1)
         points: list[float] = []
         last_valid: Optional[tuple[float, float]] = None
-        for index, value in enumerate(samples):
-            if value is None:
+        for index, raw_value in enumerate(samples):
+            if raw_value is None:
                 continue
+            value = float(raw_value)
             x = left + index * x_step
             normalized = (value - low) / (high - low)
             y = bottom - normalized * (height - 10) - 5
@@ -2593,22 +2811,10 @@ class GraphPanel(tk.Frame):
         if len(points) >= 4:
             canvas.create_line(points, fill=color, width=2.4, smooth=True)
 
-        canvas.create_text(
-            right - 4,
-            top + 12,
-            text=self._format_axis_value(high, unit),
-            fill=COLORS["subtle"],
-            font=("Segoe UI", 8),
-            anchor="e",
-        )
-        canvas.create_text(
-            right - 4,
-            bottom - 12,
-            text=self._format_axis_value(low, unit),
-            fill=COLORS["subtle"],
-            font=("Segoe UI", 8),
-            anchor="e",
-        )
+    def _format_grid_value(self, value: float, unit: str) -> str:
+        if unit == "C":
+            return f"{value:.1f}"
+        return f"{value:.0f}"
 
     def _format_axis_value(self, value: Optional[float], unit: str) -> str:
         if value is None:
@@ -2662,6 +2868,154 @@ class MetricTable(tk.Frame):
             return
         for row in rows:
             self.tree.insert("", "end", values=row)
+
+
+class OptionsWindow(tk.Toplevel):
+    def __init__(self, master: tk.Tk, app: "HeatLensApp") -> None:
+        super().__init__(master)
+        self.app = app
+        self.title(f"{APP_NAME} Options")
+        self.configure(bg=COLORS["bg"])
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        frame = tk.Frame(self, bg=COLORS["bg"], padx=18, pady=16)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.grid_columnconfigure(1, weight=1)
+
+        row = 0
+
+        tk.Label(
+            frame,
+            text="Trend graphs",
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 12, "bold"),
+            anchor="w",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        row += 1
+
+        ttk.Checkbutton(
+            frame,
+            text="Show time on X-axis",
+            variable=app.show_graph_time,
+            command=app._apply_graph_options,
+            style="HeatLens.TCheckbutton",
+        ).grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
+        tk.Label(
+            frame,
+            text="X-axis window",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=row, column=0, sticky="w", pady=(10, 4))
+        self.x_scale_combo = ttk.Combobox(
+            frame,
+            textvariable=app.graph_x_window,
+            values=GRAPH_X_WINDOW_LABELS,
+            state="readonly",
+            width=18,
+        )
+        self.x_scale_combo.grid(row=row, column=1, sticky="e", pady=(10, 4))
+        self.x_scale_combo.bind("<<ComboboxSelected>>", lambda _event: app._apply_graph_options())
+        row += 1
+
+        tk.Label(
+            frame,
+            text="Y-axis scaling",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=row, column=0, sticky="w", pady=(4, 4))
+        self.y_scale_combo = ttk.Combobox(
+            frame,
+            textvariable=app.graph_y_scale,
+            values=GRAPH_Y_SCALE_LABELS,
+            state="readonly",
+            width=18,
+        )
+        self.y_scale_combo.grid(row=row, column=1, sticky="e", pady=(4, 4))
+        self.y_scale_combo.bind("<<ComboboxSelected>>", lambda _event: app._apply_graph_options())
+        row += 1
+
+        tk.Label(
+            frame,
+            text="Include zero applies to watts and BTU/hr. Temperature always auto-scales to the visible range.",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+            wraplength=360,
+            justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 14))
+        row += 1
+
+        if sys.platform == "win32":
+            tk.Label(
+                frame,
+                text="Windows",
+                bg=COLORS["bg"],
+                fg=COLORS["text"],
+                font=("Segoe UI", 12, "bold"),
+                anchor="w",
+            ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
+            row += 1
+
+            admin_text = (
+                "Running as administrator."
+                if is_windows_admin()
+                else "Restart as administrator for extra ACPI, storage, and WMI sensors."
+            )
+            self.admin_label = tk.Label(
+                frame,
+                text=admin_text,
+                bg=COLORS["bg"],
+                fg=COLORS["muted"],
+                font=("Segoe UI", 9),
+                anchor="w",
+                wraplength=360,
+                justify="left",
+            )
+            self.admin_label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            row += 1
+
+            ttk.Checkbutton(
+                frame,
+                text="Always start as administrator",
+                variable=app.always_start_as_admin,
+                command=app._apply_always_start_as_admin,
+                style="HeatLens.TCheckbutton",
+            ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            row += 1
+
+            self.admin_button = ttk.Button(
+                frame,
+                text="Restart as administrator",
+                command=app._restart_as_admin,
+                style="HeatLens.TButton",
+                state="disabled" if is_windows_admin() else "normal",
+            )
+            self.admin_button.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 14))
+            row += 1
+
+        buttons = tk.Frame(frame, bg=COLORS["bg"])
+        buttons.grid(row=row, column=0, columnspan=2, sticky="e")
+        ttk.Button(
+            buttons,
+            text="Close",
+            command=self.destroy,
+            style="HeatLens.TButton",
+        ).grid(row=0, column=0)
+
+        self.update_idletasks()
+        x = master.winfo_rootx() + max(0, (master.winfo_width() - self.winfo_width()) // 2)
+        y = master.winfo_rooty() + max(0, (master.winfo_height() - self.winfo_height()) // 2)
+        self.geometry(f"+{x}+{y}")
 
 
 class SensorSourceWindow(tk.Toplevel):
@@ -2806,12 +3160,21 @@ class HeatLensApp:
         self.compact = False
         self.details_visible = True
         self.source_window: Optional[SensorSourceWindow] = None
+        self.options_window: Optional[OptionsWindow] = None
         self.always_on_top = tk.BooleanVar(value=False)
+        self.show_graph_time = tk.BooleanVar(value=True)
+        self.graph_x_window = tk.StringVar(value="Auto")
+        self.graph_y_scale = tk.StringVar(value="Auto")
         self.ambient_temp_var = tk.StringVar(value=f"{DEFAULT_AMBIENT_TEMP_F:.0f}")
+        self.preferences = HeatLensPreferences()
+        self.always_start_as_admin = tk.BooleanVar(
+            value=self.preferences.get_bool(PREF_ALWAYS_START_AS_ADMIN, False)
+        )
         self.libre_helper = LibreHardwareMonitorHelper()
 
         configure_ttk_style()
         self._build_ui()
+        self._apply_graph_options()
         self.poller.start()
         self.root.after(150, self._drain_queue)
         self.root.after(900, lambda: self.libre_helper.maybe_prompt_on_startup(
@@ -2911,7 +3274,14 @@ class HeatLensApp:
             command=self._toggle_compact,
             style="HeatLens.TButton",
         )
-        self.compact_button.grid(row=0, column=7)
+        self.compact_button.grid(row=0, column=7, padx=(0, 8))
+        self.options_button = ttk.Button(
+            controls,
+            text="Options",
+            command=self._show_options,
+            style="HeatLens.TButton",
+        )
+        self.options_button.grid(row=0, column=8)
 
         stats = tk.Frame(self.root, bg=COLORS["bg"])
         stats.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 12))
@@ -3045,6 +3415,74 @@ class HeatLensApp:
     def _toggle_always_on_top(self) -> None:
         self.root.attributes("-topmost", self.always_on_top.get())
 
+    def _apply_graph_options(self) -> None:
+        x_label = self.graph_x_window.get()
+        y_label = self.graph_y_scale.get()
+        x_seconds = GRAPH_X_WINDOW_SECONDS.get(x_label, None)
+        y_mode = GRAPH_Y_SCALE_MODES.get(y_label, "auto")
+        self.graph.apply_options(
+            show_time=self.show_graph_time.get(),
+            x_window_seconds=x_seconds,
+            y_scale_mode=y_mode,
+        )
+
+    def _restart_as_admin(self) -> None:
+        if sys.platform != "win32":
+            messagebox.showinfo("HeatLens", "Administrator mode is only available on Windows.", parent=self.root)
+            return
+        if is_windows_admin():
+            messagebox.showinfo("HeatLens", "HeatLens is already running as administrator.", parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "Restart as administrator",
+            "Windows will ask for permission, then HeatLens will restart with administrator rights.\n\n"
+            "This can unlock extra ACPI, storage, and WMI sensors.\n\n"
+            "Continue?",
+            parent=self.root,
+        ):
+            return
+        if not launch_heatlens_elevated():
+            messagebox.showerror(
+                "HeatLens",
+                "Could not restart as administrator. Windows may have cancelled the prompt.",
+                parent=self.root,
+            )
+            return
+        self.on_close()
+
+    def _apply_always_start_as_admin(self) -> None:
+        enabled = self.always_start_as_admin.get()
+        self.preferences.set_bool(PREF_ALWAYS_START_AS_ADMIN, enabled)
+        if not enabled or sys.platform != "win32" or is_windows_admin():
+            return
+        if messagebox.askyesno(
+            "Restart as administrator",
+            "Always start as administrator is now enabled.\n\n"
+            "Restart HeatLens now with administrator rights?",
+            parent=self.root,
+        ):
+            if launch_heatlens_elevated():
+                self.on_close()
+            else:
+                messagebox.showerror(
+                    "HeatLens",
+                    "Could not restart as administrator. Windows may have cancelled the prompt.",
+                    parent=self.root,
+                )
+
+    def _show_options(self) -> None:
+        if self.options_window is not None and self.options_window.winfo_exists():
+            self.options_window.lift()
+            self.options_window.focus_force()
+            return
+        self.options_window = OptionsWindow(self.root, self)
+        self.options_window.protocol("WM_DELETE_WINDOW", self._close_options)
+
+    def _close_options(self) -> None:
+        if self.options_window is not None and self.options_window.winfo_exists():
+            self.options_window.destroy()
+        self.options_window = None
+
     def _show_sources(self) -> None:
         if self.source_window is not None and self.source_window.winfo_exists():
             self.source_window.lift()
@@ -3149,7 +3587,12 @@ class HeatLensApp:
 
         if update_session:
             self._append_log_entry(snapshot, ambient_f)
-            self.graph.add_sample(snapshot.total_watts, snapshot.btu_per_hour, snapshot.max_temp_c)
+            self.graph.add_sample(
+                snapshot.total_watts,
+                snapshot.btu_per_hour,
+                snapshot.max_temp_c,
+                timestamp=snapshot.taken_at,
+            )
         self.power_table.set_rows(self._power_rows(snapshot, ambient_f))
         self.temp_table.set_rows(self._temperature_rows(snapshot, ambient_f))
         if self.source_window is not None and self.source_window.winfo_exists():
@@ -3433,6 +3876,8 @@ def configure_ttk_style() -> None:
 
 
 def main() -> None:
+    if maybe_elevate_on_startup():
+        return
     set_dpi_awareness()
     root = tk.Tk()
     HeatLensApp(root)

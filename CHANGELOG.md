@@ -2,6 +2,18 @@
 
 All notable changes to HeatLens are documented here.
 
+## [0.1.6] - 2026-07-10
+
+### Added
+- **Time axis** on trend graphs showing local clock time (on by default)
+- **Y-axis grid values** on each trend band
+- **Options** dialog with graph controls:
+  - Toggle X-axis time labels
+  - X-axis window: Auto, 1–30 minutes
+  - Y-axis scaling: Auto, Include zero, Padded (10%)
+  - **Restart as administrator** on Windows
+  - **Always start as administrator** (saved in `~/.heatlens/preferences.json`)
+
 ## [0.1.5] - 2026-07-10
 
 ### Changed
