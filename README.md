@@ -24,8 +24,38 @@ It shows total wattage, heat dissipation (**BTU/hr** or **kW**), session heat, l
 - **Sensor inspector** — see every source and what counts toward the total
 - **Ambient input** for above-ambient delta, air-rise, and airflow estimates
 - **Options** — units (imperial/metric), graph scaling, Windows admin mode, Excel/CSV export formatting
+- **Performance controls** — adjustable sensor refresh and **Low impact mode** to reduce CPU use and gaming stutter
 - **Excel and CSV export** for monitoring sessions (configurable columns, delimiters, timestamps)
-- **Compact mode** for a smaller always-on-top widget
+- **Compact mode** for a smaller always-on-top widget (also skips heavy detail-table updates)
+
+## Performance and stability
+
+HeatLens reads hardware sensors in the background and updates a live dashboard. Early versions polled aggressively and redrew the full UI on every sample, which could cause micro-stutter or hurt **1% lows** while gaming.
+
+**v0.1.8+** is tuned to stay out of your way:
+
+| What | Default behavior |
+|------|------------------|
+| **Sensor refresh** | Every **3 seconds** (was 1.5s) |
+| **Top cards** (watts, BTU, temps) | Update about **once per second** |
+| **Detail tables** | Rebuild every **5 seconds** (skipped entirely in **Compact** mode) |
+| **Trend graphs** | Redraw at most **once per second**, with downsampled points |
+| **LibreHardwareMonitor HTTP** | When active, redundant WMI/psutil scans are skipped; the working URL is cached |
+
+Open **Options → Performance** to change this:
+
+- **Sensor refresh** — 1, 2, **3** (recommended), 5, or 10 seconds between sensor reads
+- **Low impact mode** — best for gaming: 5s sensor refresh, slower UI/graph work, detail tables every 10s
+
+Session logging and graph history still record every sensor sample; only screen redraws are throttled. Your exported Excel/CSV logs stay complete.
+
+**Tips while gaming**
+
+1. Enable **Low impact mode** in Options, or set sensor refresh to **5–10 seconds**
+2. Use **Compact** — smaller window and no detail-table churn
+3. Pin the widget if you want it visible without alt-tabbing to a full dashboard
+
+HeatLens is a monitor, not a game overlay. It should be lightweight, but if you are squeezing maximum FPS, Low impact mode + Compact is the intended setup.
 
 ## Quick start
 
@@ -130,6 +160,9 @@ Enter ambient temperature (°F or °C) in the header. HeatLens estimates how muc
 
 **Can I use metric units?**  
 Yes. **Options → Display system → Metric (C, kW, kWh)**. Ambient converts automatically when you switch.
+
+**Will HeatLens hurt gaming performance or cause stutter?**  
+It should not when using the built-in performance controls. Enable **Options → Performance → Low impact mode** while gaming, or set sensor refresh to 5–10 seconds. **Compact** mode also reduces UI work. See [Performance and stability](#performance-and-stability) for details.
 
 **Windows says "protected your PC" when I run the `.exe`. Is it safe?**  
 That is **Microsoft SmartScreen** blocking unsigned downloads from the internet — common for indie/open-source apps. HeatLens is open source; you can inspect the code or run from source. To launch the portable exe: click **More info** → **Run anyway**. See [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) for signing and reputation options.
