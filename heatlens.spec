@@ -43,7 +43,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 is_macos = sys.platform == "darwin"
 is_windows = sys.platform == "win32"
-version_file = str(root / "build" / "version_info.txt") if is_windows else None
+version_file = str(root / "packaging" / "version_info.txt") if is_windows else None
 
 exe = EXE(
     pyz,
