@@ -35,6 +35,7 @@ Pre-built binaries are attached to [GitHub Releases](https://github.com/arogorn9
 |----------|------|-------|
 | **Windows** | `HeatLens.exe` | Double-click to run. Right-click → **Run as administrator** for extra ACPI/storage sensors. |
 | **Linux** | `HeatLens` or `HeatLens-linux-x86_64.tar.gz` | `chmod +x HeatLens && ./HeatLens`. Needs X11/Wayland with Tk; RAPL/hwmon may need permissions. |
+| **macOS** | `HeatLens-macos-arm64.tar.gz` | Extract, then open `HeatLens.app`. First launch: right-click → **Open** if Gatekeeper blocks it. |
 
 Place `LibreHardwareMonitor.exe` in the **same folder** as `HeatLens.exe` on Windows if you want the **Libre** button to find it easily.
 
@@ -48,6 +49,9 @@ To build locally:
 ```bash
 # Linux
 bash scripts/build_linux.sh
+
+# macOS
+bash scripts/build_macos.sh
 ```
 
 ### Windows (from source)

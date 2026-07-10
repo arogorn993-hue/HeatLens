@@ -52,8 +52,28 @@ jobs:
             dist/HeatLens
             dist/HeatLens-linux-*.tar.gz
 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build portable app
+        run: bash scripts/build_macos.sh
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HeatLens-macos-arm64
+          path: |
+            dist/HeatLens.app
+            dist/HeatLens-macos-*.tar.gz
+
   publish-release:
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-macos]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -69,5 +89,6 @@ jobs:
             artifacts/HeatLens-windows-x64/HeatLens.exe
             artifacts/HeatLens-linux-x64/HeatLens
             artifacts/HeatLens-linux-x64/HeatLens-linux-*.tar.gz
+            artifacts/HeatLens-macos-arm64/HeatLens-macos-*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

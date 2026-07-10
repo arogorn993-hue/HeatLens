@@ -41,6 +41,8 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+is_macos = sys.platform == "darwin"
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -52,14 +54,22 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=not is_macos,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
-    argv_emulation=False,
+    argv_emulation=is_macos,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
     version_file=None,
 )
+
+if is_macos:
+    app = BUNDLE(
+        exe,
+        name="HeatLens.app",
+        icon=None,
+        bundle_identifier="dev.heatlens.app",
+    )
