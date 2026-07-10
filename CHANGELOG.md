@@ -2,6 +2,19 @@
 
 All notable changes to HeatLens are documented here.
 
+## [0.1.7] - 2026-07-10
+
+### Added
+- **Metric units** in Options (°C, kW, kWh) with ambient auto-conversion and one-decimal precision
+- **Y-axis value toggle** on trend graphs (complement to X-axis time labels)
+- **Export options** in Options dialog:
+  - Default format: Excel (.xlsx) or CSV (.csv)
+  - Column units: match display, raw, imperial, metric, or all columns
+  - Timestamp format, CSV delimiter, header row, summary sheet, bold headers, auto-size columns
+
+### Changed
+- Ambient field shows a single unit label (°F or °C) and converts when switching unit systems
+
 ## [0.1.6] - 2026-07-10
 
 ### Added

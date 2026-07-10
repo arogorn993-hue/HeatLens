@@ -28,7 +28,7 @@ from tkinter import filedialog, messagebox, ttk
 
 
 APP_NAME = "HeatLens"
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.7"
 POLL_INTERVAL_SECONDS = 1.5
 GRAPH_X_WINDOW_LABELS: tuple[str, ...] = (
     "Auto",
@@ -57,10 +57,62 @@ GRAPH_Y_SCALE_MODES: dict[str, str] = {
     "Padded (10%)": "padded",
 }
 PREF_ALWAYS_START_AS_ADMIN = "always_start_as_admin"
-# 1 W = 3.412141633 BTU/hr (ISO 80000-5 / NIST); same factor converts Wh -> BTU.
-WATTS_TO_BTU_PER_HOUR = 3.412141633
+PREF_UNITS = "units"
+DEFAULT_AMBIENT_TEMP_C = 22.0
 DEFAULT_AMBIENT_TEMP_F = 72.0
 DEFAULT_ROOM_VOLUME_FT3 = 1000.0
+DEFAULT_ROOM_VOLUME_M3 = DEFAULT_ROOM_VOLUME_FT3 * 0.028316846592
+CFM_TO_M3_PER_HOUR = 1.6990108
+UNIT_SYSTEM_LABELS: tuple[str, ...] = ("Imperial (F, BTU)", "Metric (C, kW, kWh)")
+UNIT_SYSTEM_VALUES: dict[str, str] = {
+    UNIT_SYSTEM_LABELS[0]: "imperial",
+    UNIT_SYSTEM_LABELS[1]: "metric",
+}
+EXPORT_FORMAT_LABELS: tuple[str, ...] = ("Excel (.xlsx)", "CSV (.csv)")
+EXPORT_FORMAT_VALUES: dict[str, str] = {
+    EXPORT_FORMAT_LABELS[0]: "xlsx",
+    EXPORT_FORMAT_LABELS[1]: "csv",
+}
+EXPORT_UNITS_LABELS: tuple[str, ...] = (
+    "Match display",
+    "Raw (W, °C)",
+    "Imperial (F, BTU)",
+    "Metric (C, kW)",
+    "All columns",
+)
+EXPORT_UNITS_VALUES: dict[str, str] = {
+    EXPORT_UNITS_LABELS[0]: "match",
+    EXPORT_UNITS_LABELS[1]: "raw",
+    EXPORT_UNITS_LABELS[2]: "imperial",
+    EXPORT_UNITS_LABELS[3]: "metric",
+    EXPORT_UNITS_LABELS[4]: "all",
+}
+EXPORT_CSV_DELIMITER_LABELS: tuple[str, ...] = ("Comma (,)", "Semicolon (;)", "Tab")
+EXPORT_CSV_DELIMITER_VALUES: dict[str, str] = {
+    EXPORT_CSV_DELIMITER_LABELS[0]: ",",
+    EXPORT_CSV_DELIMITER_LABELS[1]: ";",
+    EXPORT_CSV_DELIMITER_LABELS[2]: "\t",
+}
+EXPORT_TIMESTAMP_LABELS: tuple[str, ...] = (
+    "YYYY-MM-DD HH:MM:SS",
+    "MM/DD/YYYY HH:MM:SS",
+    "Unix timestamp",
+)
+EXPORT_TIMESTAMP_VALUES: dict[str, str] = {
+    EXPORT_TIMESTAMP_LABELS[0]: "iso",
+    EXPORT_TIMESTAMP_LABELS[1]: "us",
+    EXPORT_TIMESTAMP_LABELS[2]: "unix",
+}
+PREF_EXPORT_FORMAT = "export_format"
+PREF_EXPORT_UNITS = "export_units"
+PREF_EXPORT_CSV_DELIMITER = "export_csv_delimiter"
+PREF_EXPORT_INCLUDE_HEADERS = "export_include_headers"
+PREF_EXPORT_INCLUDE_SUMMARY = "export_include_summary"
+PREF_EXPORT_BOLD_HEADERS = "export_bold_headers"
+PREF_EXPORT_AUTO_SIZE_COLUMNS = "export_auto_size_columns"
+PREF_EXPORT_TIMESTAMP_FORMAT = "export_timestamp_format"
+# 1 W = 3.412141633 BTU/hr (ISO 80000-5 / NIST); same factor converts Wh -> BTU.
+WATTS_TO_BTU_PER_HOUR = 3.412141633
 REFERENCE_EXHAUST_RISE_F = 10.0
 LIBRE_HARDWARE_MONITOR_DOWNLOAD_URL = (
     "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest"
@@ -254,7 +306,7 @@ def heat_equivalent_label(watts: float) -> str:
     return f"{label} ({format_watts(equivalent_watts)})"
 
 
-def parse_ambient_temperature_f(value: str) -> Optional[float]:
+def parse_ambient_temperature_f(value: str, *, metric: bool = False) -> Optional[float]:
     text = str(value or "").strip().lower()
     if not text:
         return None
@@ -268,10 +320,23 @@ def parse_ambient_temperature_f(value: str) -> Optional[float]:
     if number is None:
         return None
 
-    fahrenheit = celsius_to_fahrenheit(number) if is_celsius else number
+    if is_fahrenheit:
+        fahrenheit = number
+    elif is_celsius:
+        fahrenheit = celsius_to_fahrenheit(number)
+    elif metric:
+        fahrenheit = celsius_to_fahrenheit(number)
+    else:
+        fahrenheit = number
     if not 0.0 <= fahrenheit <= 130.0:
         return None
     return fahrenheit
+
+
+def format_ambient_entry_value(ambient_f: float, *, metric: bool) -> str:
+    if metric:
+        return f"{fahrenheit_to_celsius(ambient_f):.1f}"
+    return f"{ambient_f:.1f}"
 
 
 def air_heat_capacity_btu_per_ft3_f(ambient_f: float) -> float:
@@ -328,16 +393,55 @@ def read_sysfs_text(path: Path) -> str:
         return ""
 
 
-def format_temp_delta(delta_c: float) -> str:
+def format_temp(celsius: Optional[float], *, metric: bool = False) -> str:
+    if celsius is None:
+        return "--"
+    if metric:
+        return f"{celsius:.1f} °C"
+    fahrenheit = celsius_to_fahrenheit(celsius)
+    return f"{celsius:.1f} C / {fahrenheit:.1f} F"
+
+
+def format_ambient_display(ambient_f: float, *, metric: bool = False) -> str:
+    if metric:
+        return f"{fahrenheit_to_celsius(ambient_f):.1f} °C"
+    return format_temp_f_c(ambient_f)
+
+
+def format_temp_delta(delta_c: float, *, metric: bool = False) -> str:
+    if metric:
+        return f"{delta_c:+.1f} °C"
     delta_f = delta_c * 9.0 / 5.0
     return f"{delta_c:+.1f} C / {delta_f:+.1f} F"
 
 
-def format_temp(celsius: Optional[float]) -> str:
-    if celsius is None:
-        return "--"
-    fahrenheit = celsius_to_fahrenheit(celsius)
-    return f"{celsius:.0f} C / {fahrenheit:.0f} F"
+def format_heat_dissipation(watts: float, *, metric: bool = False) -> str:
+    if metric:
+        return f"{watts / 1000.0:.3f} kW"
+    return format_btu_per_hour(watts * WATTS_TO_BTU_PER_HOUR)
+
+
+def format_session_heat_display(session_wh: float, *, metric: bool = False) -> str:
+    if metric:
+        return format_kwh(session_wh / 1000.0)
+    return format_btu(session_wh * WATTS_TO_BTU_PER_HOUR)
+
+
+def still_air_rise_display(btu_per_hour: float, ambient_f: float, *, metric: bool = False) -> str:
+    rise_f = still_air_rise_f_per_hour(btu_per_hour, ambient_f)
+    if metric:
+        rise_c = rise_f * 5.0 / 9.0
+        return f"+{rise_c:.1f} °C/hr per {DEFAULT_ROOM_VOLUME_M3:.0f} m³"
+    return f"+{rise_f:.1f} F/hr per {DEFAULT_ROOM_VOLUME_FT3:,.0f} ft³"
+
+
+def airflow_display(btu_per_hour: float, ambient_f: float, *, metric: bool = False) -> str:
+    cfm = airflow_for_exhaust_rise_cfm(btu_per_hour, ambient_f)
+    if metric:
+        rise_c = REFERENCE_EXHAUST_RISE_F * 5.0 / 9.0
+        m3_per_hour = cfm * CFM_TO_M3_PER_HOUR
+        return f"{m3_per_hour:.0f} m³/h for +{rise_c:.0f} °C exhaust"
+    return f"{cfm:.0f} CFM for +{REFERENCE_EXHAUST_RISE_F:.0f} F exhaust"
 
 
 def format_graph_time(timestamp: float, *, include_seconds: bool = False) -> str:
@@ -388,13 +492,15 @@ class SensorReading:
     max_temperature_eligible: bool = True
     note: str = ""
 
-    def display_value(self) -> str:
+    def display_value(self, *, metric: bool = False) -> str:
         prefix = "~" if self.estimated else ""
         if self.unit == "W":
             return f"{prefix}{format_watts(self.value)}"
         if self.unit == "C":
+            if metric:
+                return f"{prefix}{self.value:.1f} °C"
             fahrenheit = self.value * 9.0 / 5.0 + 32.0
-            return f"{self.value:.1f} C / {fahrenheit:.1f} F"
+            return f"{prefix}{self.value:.1f} C / {fahrenheit:.1f} F"
         return f"{prefix}{self.value:.1f} {self.unit}"
 
 
@@ -461,6 +567,117 @@ class SessionLogEntry:
     status: str
     selected_sources: str
     notes: str
+
+
+@dataclass
+class ExportSettings:
+    file_format: str = "xlsx"
+    units_mode: str = "match"
+    csv_delimiter: str = ","
+    include_headers: bool = True
+    include_summary: bool = True
+    bold_headers: bool = True
+    auto_size_columns: bool = True
+    timestamp_format: str = "iso"
+    display_metric: bool = False
+
+    def resolved_units_mode(self) -> str:
+        if self.units_mode != "match":
+            return self.units_mode
+        return "metric" if self.display_metric else "imperial"
+
+    @classmethod
+    def from_preferences(cls, preferences: "HeatLensPreferences", *, display_metric: bool) -> "ExportSettings":
+        format_value = preferences.get_str(PREF_EXPORT_FORMAT, "xlsx")
+        units_value = preferences.get_str(PREF_EXPORT_UNITS, "match")
+        delimiter_value = preferences.get_str(PREF_EXPORT_CSV_DELIMITER, ",")
+        timestamp_value = preferences.get_str(PREF_EXPORT_TIMESTAMP_FORMAT, "iso")
+        return cls(
+            file_format=format_value if format_value in EXPORT_FORMAT_VALUES.values() else "xlsx",
+            units_mode=units_value if units_value in EXPORT_UNITS_VALUES.values() else "match",
+            csv_delimiter=delimiter_value if delimiter_value in EXPORT_CSV_DELIMITER_VALUES.values() else ",",
+            include_headers=preferences.get_bool(PREF_EXPORT_INCLUDE_HEADERS, True),
+            include_summary=preferences.get_bool(PREF_EXPORT_INCLUDE_SUMMARY, True),
+            bold_headers=preferences.get_bool(PREF_EXPORT_BOLD_HEADERS, True),
+            auto_size_columns=preferences.get_bool(PREF_EXPORT_AUTO_SIZE_COLUMNS, True),
+            timestamp_format=timestamp_value if timestamp_value in EXPORT_TIMESTAMP_VALUES.values() else "iso",
+            display_metric=display_metric,
+        )
+
+
+def _export_label_for_value(value: str, labels: tuple[str, ...], mapping: dict[str, str]) -> str:
+    for label in labels:
+        if mapping.get(label) == value:
+            return label
+    return labels[0]
+
+
+def format_export_timestamp(timestamp: datetime, timestamp_format: str) -> object:
+    if timestamp_format == "unix":
+        return round(timestamp.timestamp(), 3)
+    if timestamp_format == "us":
+        return timestamp.strftime("%m/%d/%Y %H:%M:%S")
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def build_session_export_table(
+    session_log: list[SessionLogEntry],
+    settings: ExportSettings,
+) -> tuple[list[str], list[list[object]]]:
+    units = settings.resolved_units_mode()
+    columns: list[tuple[str, Callable[[SessionLogEntry], object]]] = [
+        ("Timestamp", lambda entry: format_export_timestamp(entry.timestamp, settings.timestamp_format)),
+        ("Elapsed Seconds", lambda entry: round(entry.elapsed_seconds, 1)),
+        ("Total Watts", lambda entry: round(entry.total_watts, 2)),
+        ("Direct Watts", lambda entry: round(entry.direct_watts, 2)),
+        ("Estimated Watts", lambda entry: round(entry.estimated_watts, 2)),
+        (
+            "Average kWh/hr",
+            lambda entry: round(entry.average_kwh_per_hour, 4)
+            if entry.average_kwh_per_hour is not None
+            else None,
+        ),
+    ]
+
+    if units in ("raw", "imperial", "all"):
+        columns.append(("BTU/hr", lambda entry: round(entry.btu_per_hour, 2)))
+    if units in ("metric", "all"):
+        columns.append(("kW", lambda entry: round(entry.total_watts / 1000.0, 4)))
+
+    columns.append((
+        "Max Temp C",
+        lambda entry: round(entry.max_temp_c, 2) if entry.max_temp_c is not None else None,
+    ))
+    if units in ("imperial", "all"):
+        columns.append((
+            "Max Temp F",
+            lambda entry: round(celsius_to_fahrenheit(entry.max_temp_c), 2)
+            if entry.max_temp_c is not None
+            else None,
+        ))
+    if units in ("imperial", "all"):
+        columns.append((
+            "Ambient F",
+            lambda entry: round(entry.ambient_f, 2) if entry.ambient_f is not None else None,
+        ))
+    if units in ("metric", "all", "raw"):
+        columns.append((
+            "Ambient C",
+            lambda entry: round(fahrenheit_to_celsius(entry.ambient_f), 2)
+            if entry.ambient_f is not None
+            else None,
+        ))
+
+    columns.extend([
+        ("Heat Equivalent", lambda entry: entry.heat_equivalent),
+        ("Status", lambda entry: entry.status),
+        ("Selected Sources", lambda entry: entry.selected_sources),
+        ("Notes", lambda entry: entry.notes),
+    ])
+
+    headers = [header for header, _getter in columns]
+    rows = [[getter(entry) for _header, getter in columns] for entry in session_log]
+    return headers, rows
 
 
 class LibreHardwareMonitorBackend:
@@ -849,6 +1066,14 @@ class HeatLensPreferences:
         return bool(value)
 
     def set_bool(self, key: str, value: bool) -> None:
+        self.data[key] = value
+        self.save()
+
+    def get_str(self, key: str, default: str = "") -> str:
+        value = self.data.get(key, default)
+        return str(value)
+
+    def set_str(self, key: str, value: str) -> None:
         self.data[key] = value
         self.save()
 
@@ -2537,6 +2762,9 @@ class StatCard(tk.Frame):
         )
         self.sub_label.grid(row=2, column=0, sticky="ew", padx=(16, 12), pady=(0, 12))
 
+    def set_title(self, title: str) -> None:
+        self.title_label.configure(text=title.upper())
+
     def set(self, value: str, subtext: str) -> None:
         self.value_label.configure(text=value)
         self.sub_label.configure(text=subtext)
@@ -2566,20 +2794,39 @@ class GraphPanel(tk.Frame):
         self.canvas.bind("<Configure>", lambda _event: self.redraw())
         self.history: deque[dict[str, object]] = deque(maxlen=2000)
         self.show_time = True
+        self.show_y_values = True
         self.x_window_seconds: Optional[float] = None
         self.y_scale_mode = "auto"
+        self.use_metric = False
 
     def apply_options(
         self,
         *,
         show_time: bool,
+        show_y_values: bool,
         x_window_seconds: Optional[float],
         y_scale_mode: str,
+        use_metric: bool = False,
     ) -> None:
         self.show_time = show_time
+        self.show_y_values = show_y_values
         self.x_window_seconds = x_window_seconds
         self.y_scale_mode = y_scale_mode
+        self.use_metric = use_metric
         self.redraw()
+
+    def _band_configs(self) -> list[tuple[str, str, str, str]]:
+        if self.use_metric:
+            return [
+                ("watts", "Watts", "W", COLORS["green"]),
+                ("kw", "Heat", "kW", COLORS["amber"]),
+                ("temp", "Max temp", "C", COLORS["coral"]),
+            ]
+        return [
+            ("watts", "Watts", "W", COLORS["green"]),
+            ("btu", "BTU/hr", "BTU/hr", COLORS["amber"]),
+            ("temp", "Max temp", "C", COLORS["coral"]),
+        ]
 
     def set_show_time(self, enabled: bool) -> None:
         self.show_time = enabled
@@ -2602,7 +2849,7 @@ class GraphPanel(tk.Frame):
             low = low - padding if key == "temp" else max(0.0, low - padding)
             high += padding
 
-        if self.y_scale_mode == "zero" and key in ("watts", "btu"):
+        if self.y_scale_mode == "zero" and key in ("watts", "btu", "kw"):
             low = 0.0
             if high <= 0.0:
                 high = 10.0
@@ -2611,7 +2858,7 @@ class GraphPanel(tk.Frame):
             padding = span * 0.10 if span > 0 else (1.0 if unit == "C" else max(1.0, abs(high) * 0.1))
             low -= padding
             high += padding
-            if key in ("watts", "btu"):
+            if key in ("watts", "btu", "kw"):
                 low = max(0.0, low)
         elif self.y_scale_mode == "zero" and key == "temp":
             span = high - low
@@ -2651,11 +2898,7 @@ class GraphPanel(tk.Frame):
         plot_height = height - top_pad - time_axis_h
         band_height = (plot_height - band_gap * 2) / 3.0
 
-        bands = [
-            ("watts", "Watts", "W", COLORS["green"]),
-            ("btu", "BTU/hr", "BTU/hr", COLORS["amber"]),
-            ("temp", "Max temp", "C", COLORS["coral"]),
-        ]
+        bands = self._band_configs()
 
         for index, (key, label, unit, color) in enumerate(bands):
             y = top_pad + index * (band_height + band_gap)
@@ -2739,7 +2982,10 @@ class GraphPanel(tk.Frame):
         canvas.create_rectangle(left, top, right, bottom, fill=COLORS["bg"], outline=COLORS["grid"])
 
         visible = self._visible_samples()
-        values = [float(sample[key]) for sample in visible if sample.get(key) is not None]
+        if key == "kw":
+            values = [float(sample["watts"]) / 1000.0 for sample in visible if sample.get("watts") is not None]
+        else:
+            values = [float(sample[key]) for sample in visible if sample.get(key) is not None]
         current = values[-1] if values else None
         current_text = self._format_axis_value(current, unit)
         canvas.create_text(
@@ -2779,19 +3025,20 @@ class GraphPanel(tk.Frame):
             grid_y = plot_top + fraction * plot_height
             canvas.create_line(left, grid_y, right, grid_y, fill=COLORS["grid"])
 
-        for fraction in (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0):
-            grid_value = high - fraction * (high - low)
-            grid_y = plot_top + fraction * plot_height
-            canvas.create_text(
-                right - 6,
-                grid_y,
-                text=self._format_grid_value(grid_value, unit),
-                fill=COLORS["muted"],
-                font=("Segoe UI", 8),
-                anchor="e",
-            )
+        if self.show_y_values:
+            for fraction in (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0):
+                grid_value = high - fraction * (high - low)
+                grid_y = plot_top + fraction * plot_height
+                canvas.create_text(
+                    right - 6,
+                    grid_y,
+                    text=self._format_grid_value(grid_value, unit),
+                    fill=COLORS["muted"],
+                    font=("Segoe UI", 8),
+                    anchor="e",
+                )
 
-        samples = [sample.get(key) for sample in visible]
+        samples = [sample.get("watts") if key == "kw" else sample.get(key) for sample in visible]
         x_step = (right - left) / max(1, len(samples) - 1)
         points: list[float] = []
         last_valid: Optional[tuple[float, float]] = None
@@ -2799,6 +3046,8 @@ class GraphPanel(tk.Frame):
             if raw_value is None:
                 continue
             value = float(raw_value)
+            if key == "kw":
+                value /= 1000.0
             x = left + index * x_step
             normalized = (value - low) / (high - low)
             y = bottom - normalized * (height - 10) - 5
@@ -2814,6 +3063,8 @@ class GraphPanel(tk.Frame):
     def _format_grid_value(self, value: float, unit: str) -> str:
         if unit == "C":
             return f"{value:.1f}"
+        if unit == "kW":
+            return f"{value:.3f}"
         return f"{value:.0f}"
 
     def _format_axis_value(self, value: Optional[float], unit: str) -> str:
@@ -2821,6 +3072,8 @@ class GraphPanel(tk.Frame):
             return "--"
         if unit == "BTU/hr":
             return f"{value:.0f}"
+        if unit == "kW":
+            return f"{value:.3f} kW"
         if unit == "W":
             return f"{value:.0f} W"
         return f"{value:.0f} C"
@@ -2905,6 +3158,15 @@ class OptionsWindow(tk.Toplevel):
         ).grid(row=row, column=0, columnspan=2, sticky="w")
         row += 1
 
+        ttk.Checkbutton(
+            frame,
+            text="Show values on Y-axis",
+            variable=app.show_graph_y_values,
+            command=app._apply_graph_options,
+            style="HeatLens.TCheckbutton",
+        ).grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
         tk.Label(
             frame,
             text="X-axis window",
@@ -2945,7 +3207,182 @@ class OptionsWindow(tk.Toplevel):
 
         tk.Label(
             frame,
-            text="Include zero applies to watts and BTU/hr. Temperature always auto-scales to the visible range.",
+            text="Include zero applies to watts and heat (BTU/hr or kW). Temperature always auto-scales to the visible range.",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+            wraplength=360,
+            justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 14))
+        row += 1
+
+        tk.Label(
+            frame,
+            text="Units",
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 12, "bold"),
+            anchor="w",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        row += 1
+
+        tk.Label(
+            frame,
+            text="Display system",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=row, column=0, sticky="w", pady=(4, 4))
+        self.units_combo = ttk.Combobox(
+            frame,
+            textvariable=app.units_system,
+            values=UNIT_SYSTEM_LABELS,
+            state="readonly",
+            width=24,
+        )
+        self.units_combo.grid(row=row, column=1, sticky="e", pady=(4, 4))
+        self.units_combo.bind("<<ComboboxSelected>>", lambda _event: app._apply_units_option())
+        row += 1
+
+        tk.Label(
+            frame,
+            text="Metric shows °C, kW, and kWh. Imperial shows °F, BTU/hr, and BTU. Ambient converts automatically when you switch units.",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+            wraplength=360,
+            justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 14))
+        row += 1
+
+        tk.Label(
+            frame,
+            text="Export",
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 12, "bold"),
+            anchor="w",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        row += 1
+
+        tk.Label(
+            frame,
+            text="Default format",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=row, column=0, sticky="w", pady=(4, 4))
+        self.export_format_combo = ttk.Combobox(
+            frame,
+            textvariable=app.export_format,
+            values=EXPORT_FORMAT_LABELS,
+            state="readonly",
+            width=24,
+        )
+        self.export_format_combo.grid(row=row, column=1, sticky="e", pady=(4, 4))
+        self.export_format_combo.bind("<<ComboboxSelected>>", lambda _event: app._apply_export_options())
+        row += 1
+
+        tk.Label(
+            frame,
+            text="Column units",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=row, column=0, sticky="w", pady=(4, 4))
+        self.export_units_combo = ttk.Combobox(
+            frame,
+            textvariable=app.export_units,
+            values=EXPORT_UNITS_LABELS,
+            state="readonly",
+            width=24,
+        )
+        self.export_units_combo.grid(row=row, column=1, sticky="e", pady=(4, 4))
+        self.export_units_combo.bind("<<ComboboxSelected>>", lambda _event: app._apply_export_options())
+        row += 1
+
+        tk.Label(
+            frame,
+            text="Timestamp format",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=row, column=0, sticky="w", pady=(4, 4))
+        self.export_timestamp_combo = ttk.Combobox(
+            frame,
+            textvariable=app.export_timestamp_format,
+            values=EXPORT_TIMESTAMP_LABELS,
+            state="readonly",
+            width=24,
+        )
+        self.export_timestamp_combo.grid(row=row, column=1, sticky="e", pady=(4, 4))
+        self.export_timestamp_combo.bind("<<ComboboxSelected>>", lambda _event: app._apply_export_options())
+        row += 1
+
+        tk.Label(
+            frame,
+            text="CSV delimiter",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=row, column=0, sticky="w", pady=(4, 4))
+        self.export_delimiter_combo = ttk.Combobox(
+            frame,
+            textvariable=app.export_csv_delimiter,
+            values=EXPORT_CSV_DELIMITER_LABELS,
+            state="readonly",
+            width=24,
+        )
+        self.export_delimiter_combo.grid(row=row, column=1, sticky="e", pady=(4, 4))
+        self.export_delimiter_combo.bind("<<ComboboxSelected>>", lambda _event: app._apply_export_options())
+        row += 1
+
+        ttk.Checkbutton(
+            frame,
+            text="Include header row",
+            variable=app.export_include_headers,
+            command=app._apply_export_options,
+            style="HeatLens.TCheckbutton",
+        ).grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
+        ttk.Checkbutton(
+            frame,
+            text="Include summary sheet (Excel only)",
+            variable=app.export_include_summary,
+            command=app._apply_export_options,
+            style="HeatLens.TCheckbutton",
+        ).grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
+        ttk.Checkbutton(
+            frame,
+            text="Bold header row (Excel only)",
+            variable=app.export_bold_headers,
+            command=app._apply_export_options,
+            style="HeatLens.TCheckbutton",
+        ).grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
+        ttk.Checkbutton(
+            frame,
+            text="Auto-size columns (Excel only)",
+            variable=app.export_auto_size_columns,
+            command=app._apply_export_options,
+            style="HeatLens.TCheckbutton",
+        ).grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
+        tk.Label(
+            frame,
+            text="Export uses these defaults. The save dialog can still pick .xlsx or .csv.",
             bg=COLORS["bg"],
             fg=COLORS["muted"],
             font=("Segoe UI", 9),
@@ -3019,8 +3456,9 @@ class OptionsWindow(tk.Toplevel):
 
 
 class SensorSourceWindow(tk.Toplevel):
-    def __init__(self, master: tk.Widget) -> None:
+    def __init__(self, master: tk.Widget, app: "HeatLensApp") -> None:
         super().__init__(master)
+        self.app = app
         self.title("HeatLens Sensors")
         self.configure(bg=COLORS["bg"])
         self.geometry("1040x520")
@@ -3102,7 +3540,7 @@ class SensorSourceWindow(tk.Toplevel):
                     "Power",
                     component_label(reading),
                     reading.name,
-                    reading.display_value(),
+                    reading.display_value(metric=self.app._use_metric()),
                     display_source(reading),
                     self._used_label(reading),
                     short_identifier(reading),
@@ -3116,7 +3554,7 @@ class SensorSourceWindow(tk.Toplevel):
                     "Temp",
                     component_label(reading),
                     reading.name,
-                    reading.display_value(),
+                    reading.display_value(metric=self.app._use_metric()),
                     display_source(reading),
                     "",
                     short_identifier(reading),
@@ -3163,17 +3601,55 @@ class HeatLensApp:
         self.options_window: Optional[OptionsWindow] = None
         self.always_on_top = tk.BooleanVar(value=False)
         self.show_graph_time = tk.BooleanVar(value=True)
+        self.show_graph_y_values = tk.BooleanVar(value=True)
         self.graph_x_window = tk.StringVar(value="Auto")
         self.graph_y_scale = tk.StringVar(value="Auto")
-        self.ambient_temp_var = tk.StringVar(value=f"{DEFAULT_AMBIENT_TEMP_F:.0f}")
         self.preferences = HeatLensPreferences()
+        saved_units = self.preferences.get_str(PREF_UNITS, "imperial")
+        units_label = UNIT_SYSTEM_LABELS[1] if saved_units == "metric" else UNIT_SYSTEM_LABELS[0]
+        self.units_system = tk.StringVar(value=units_label)
+        self.ambient_temp_var = tk.StringVar(value=f"{DEFAULT_AMBIENT_TEMP_F:.1f}")
         self.always_start_as_admin = tk.BooleanVar(
             value=self.preferences.get_bool(PREF_ALWAYS_START_AS_ADMIN, False)
         )
+        self.export_format = tk.StringVar(value=_export_label_for_value(
+            self.preferences.get_str(PREF_EXPORT_FORMAT, "xlsx"),
+            EXPORT_FORMAT_LABELS,
+            EXPORT_FORMAT_VALUES,
+        ))
+        self.export_units = tk.StringVar(value=_export_label_for_value(
+            self.preferences.get_str(PREF_EXPORT_UNITS, "match"),
+            EXPORT_UNITS_LABELS,
+            EXPORT_UNITS_VALUES,
+        ))
+        self.export_csv_delimiter = tk.StringVar(value=_export_label_for_value(
+            self.preferences.get_str(PREF_EXPORT_CSV_DELIMITER, ","),
+            EXPORT_CSV_DELIMITER_LABELS,
+            EXPORT_CSV_DELIMITER_VALUES,
+        ))
+        self.export_timestamp_format = tk.StringVar(value=_export_label_for_value(
+            self.preferences.get_str(PREF_EXPORT_TIMESTAMP_FORMAT, "iso"),
+            EXPORT_TIMESTAMP_LABELS,
+            EXPORT_TIMESTAMP_VALUES,
+        ))
+        self.export_include_headers = tk.BooleanVar(
+            value=self.preferences.get_bool(PREF_EXPORT_INCLUDE_HEADERS, True)
+        )
+        self.export_include_summary = tk.BooleanVar(
+            value=self.preferences.get_bool(PREF_EXPORT_INCLUDE_SUMMARY, True)
+        )
+        self.export_bold_headers = tk.BooleanVar(
+            value=self.preferences.get_bool(PREF_EXPORT_BOLD_HEADERS, True)
+        )
+        self.export_auto_size_columns = tk.BooleanVar(
+            value=self.preferences.get_bool(PREF_EXPORT_AUTO_SIZE_COLUMNS, True)
+        )
         self.libre_helper = LibreHardwareMonitorHelper()
+        self._ambient_entry_metric = False
 
         configure_ttk_style()
         self._build_ui()
+        self._apply_units_option(initial=True)
         self._apply_graph_options()
         self.poller.start()
         self.root.after(150, self._drain_queue)
@@ -3231,14 +3707,15 @@ class HeatLensApp:
         self.ambient_entry.grid(row=0, column=1, padx=(0, 4))
         self.ambient_entry.bind("<Return>", self._refresh_current_snapshot)
         self.ambient_entry.bind("<FocusOut>", self._refresh_current_snapshot)
-        tk.Label(
+        self.ambient_unit_label = tk.Label(
             controls,
-            text="F/C",
+            text="°F",
             bg=COLORS["bg"],
             fg=COLORS["muted"],
             font=("Segoe UI", 9),
             anchor="w",
-        ).grid(row=0, column=2, padx=(0, 10))
+        )
+        self.ambient_unit_label.grid(row=0, column=2, padx=(0, 10))
         self.top_check = ttk.Checkbutton(
             controls,
             text="Pin",
@@ -3415,6 +3892,31 @@ class HeatLensApp:
     def _toggle_always_on_top(self) -> None:
         self.root.attributes("-topmost", self.always_on_top.get())
 
+    def _use_metric(self) -> bool:
+        return UNIT_SYSTEM_VALUES.get(self.units_system.get(), "imperial") == "metric"
+
+    def _apply_units_option(self, initial: bool = False) -> None:
+        units_value = UNIT_SYSTEM_VALUES.get(self.units_system.get(), "imperial")
+        self.preferences.set_str(PREF_UNITS, units_value)
+        new_metric = units_value == "metric"
+        previous_metric = self._ambient_entry_metric
+        if new_metric != previous_metric or initial:
+            self._sync_ambient_entry_for_units(new_metric, previous_metric=previous_metric)
+        self._ambient_entry_metric = new_metric
+        self.ambient_unit_label.configure(text="°C" if new_metric else "°F")
+        self.heat_card.set_title("Heat Dissipation (kW)" if new_metric else "Heat Dissipation")
+        self.session_card.set_title("Session Energy" if new_metric else "Session Heat")
+        self._apply_graph_options()
+        if not initial and self.last_snapshot is not None:
+            self._apply_snapshot(self.last_snapshot, update_session=False)
+
+    def _sync_ambient_entry_for_units(self, metric: bool, *, previous_metric: bool) -> None:
+        ambient_f = parse_ambient_temperature_f(self.ambient_temp_var.get(), metric=previous_metric)
+        if ambient_f is None:
+            self.ambient_temp_var.set(format_ambient_entry_value(DEFAULT_AMBIENT_TEMP_F, metric=metric))
+            return
+        self.ambient_temp_var.set(format_ambient_entry_value(ambient_f, metric=metric))
+
     def _apply_graph_options(self) -> None:
         x_label = self.graph_x_window.get()
         y_label = self.graph_y_scale.get()
@@ -3422,9 +3924,46 @@ class HeatLensApp:
         y_mode = GRAPH_Y_SCALE_MODES.get(y_label, "auto")
         self.graph.apply_options(
             show_time=self.show_graph_time.get(),
+            show_y_values=self.show_graph_y_values.get(),
             x_window_seconds=x_seconds,
             y_scale_mode=y_mode,
+            use_metric=self._use_metric(),
         )
+
+    def _export_settings(self) -> ExportSettings:
+        return ExportSettings(
+            file_format=EXPORT_FORMAT_VALUES.get(self.export_format.get(), "xlsx"),
+            units_mode=EXPORT_UNITS_VALUES.get(self.export_units.get(), "match"),
+            csv_delimiter=EXPORT_CSV_DELIMITER_VALUES.get(self.export_csv_delimiter.get(), ","),
+            include_headers=self.export_include_headers.get(),
+            include_summary=self.export_include_summary.get(),
+            bold_headers=self.export_bold_headers.get(),
+            auto_size_columns=self.export_auto_size_columns.get(),
+            timestamp_format=EXPORT_TIMESTAMP_VALUES.get(self.export_timestamp_format.get(), "iso"),
+            display_metric=self._use_metric(),
+        )
+
+    def _apply_export_options(self) -> None:
+        self.preferences.set_str(
+            PREF_EXPORT_FORMAT,
+            EXPORT_FORMAT_VALUES.get(self.export_format.get(), "xlsx"),
+        )
+        self.preferences.set_str(
+            PREF_EXPORT_UNITS,
+            EXPORT_UNITS_VALUES.get(self.export_units.get(), "match"),
+        )
+        self.preferences.set_str(
+            PREF_EXPORT_CSV_DELIMITER,
+            EXPORT_CSV_DELIMITER_VALUES.get(self.export_csv_delimiter.get(), ","),
+        )
+        self.preferences.set_str(
+            PREF_EXPORT_TIMESTAMP_FORMAT,
+            EXPORT_TIMESTAMP_VALUES.get(self.export_timestamp_format.get(), "iso"),
+        )
+        self.preferences.set_bool(PREF_EXPORT_INCLUDE_HEADERS, self.export_include_headers.get())
+        self.preferences.set_bool(PREF_EXPORT_INCLUDE_SUMMARY, self.export_include_summary.get())
+        self.preferences.set_bool(PREF_EXPORT_BOLD_HEADERS, self.export_bold_headers.get())
+        self.preferences.set_bool(PREF_EXPORT_AUTO_SIZE_COLUMNS, self.export_auto_size_columns.get())
 
     def _restart_as_admin(self) -> None:
         if sys.platform != "win32":
@@ -3488,7 +4027,7 @@ class HeatLensApp:
             self.source_window.lift()
             self.source_window.focus_force()
         else:
-            self.source_window = SensorSourceWindow(self.root)
+            self.source_window = SensorSourceWindow(self.root, self)
             self.source_window.protocol("WM_DELETE_WINDOW", self._close_sources)
         if self.last_snapshot is not None:
             self.source_window.update_snapshot(self.last_snapshot)
@@ -3503,26 +4042,38 @@ class HeatLensApp:
             self._apply_snapshot(self.last_snapshot, update_session=False)
 
     def _ambient_temp_f(self) -> Optional[float]:
-        return parse_ambient_temperature_f(self.ambient_temp_var.get())
+        return parse_ambient_temperature_f(self.ambient_temp_var.get(), metric=self._ambient_entry_metric)
 
     def _export_log(self) -> None:
         if not self.session_log:
             messagebox.showinfo("HeatLens Export", "No logged samples are available yet.")
             return
 
-        default_name = f"HeatLens_Log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        settings = self._export_settings()
+        default_ext = ".csv" if settings.file_format == "csv" else ".xlsx"
+        default_name = f"HeatLens_Log_{datetime.now().strftime('%Y%m%d_%H%M%S')}{default_ext}"
         path = filedialog.asksaveasfilename(
             parent=self.root,
             title="Export HeatLens log",
-            defaultextension=".xlsx",
-            filetypes=[("Excel workbook", "*.xlsx")],
+            defaultextension=default_ext,
+            filetypes=[
+                ("Excel workbook", "*.xlsx"),
+                ("CSV file", "*.csv"),
+                ("All files", "*.*"),
+            ],
             initialfile=default_name,
         )
         if not path:
             return
 
+        path_lower = path.lower()
+        if path_lower.endswith(".csv"):
+            settings.file_format = "csv"
+        elif path_lower.endswith(".xlsx"):
+            settings.file_format = "xlsx"
+
         try:
-            export_session_log_to_excel(self.session_log, path)
+            export_session_log(self.session_log, path, settings)
         except ModuleNotFoundError as exc:
             if exc.name == "openpyxl":
                 messagebox.showerror(
@@ -3534,7 +4085,11 @@ class HeatLensApp:
         except Exception as exc:
             messagebox.showerror("HeatLens Export", f"Export failed: {exc}")
         else:
-            messagebox.showinfo("HeatLens Export", f"Exported {len(self.session_log)} samples to:\n{path}")
+            format_label = "CSV" if settings.file_format == "csv" else "Excel"
+            messagebox.showinfo(
+                "HeatLens Export",
+                f"Exported {len(self.session_log)} samples as {format_label} to:\n{path}",
+            )
 
     def _toggle_compact(self) -> None:
         self.compact = not self.compact
@@ -3563,7 +4118,7 @@ class HeatLensApp:
         if update_session:
             self._update_session_energy(snapshot)
         self.last_snapshot = snapshot
-        session_btu = self.session_wh * WATTS_TO_BTU_PER_HOUR
+        metric = self._use_metric()
         ambient_f = self._ambient_temp_f()
 
         direct_count = len([reading for reading in snapshot.selected_power if not reading.estimated])
@@ -3579,11 +4134,17 @@ class HeatLensApp:
 
         self.status_label.configure(text=snapshot.status)
         self.watts_card.set(format_watts(snapshot.total_watts), selected_label)
-        self.heat_card.set(format_btu_per_hour(snapshot.btu_per_hour), heat_equivalent_label(snapshot.total_watts))
-        self.session_card.set(format_btu(session_btu), f"Since launch, {self._elapsed_text()}")
+        self.heat_card.set(
+            format_heat_dissipation(snapshot.total_watts, metric=metric),
+            heat_equivalent_label(snapshot.total_watts),
+        )
+        self.session_card.set(
+            format_session_heat_display(self.session_wh, metric=metric),
+            f"Since launch, {self._elapsed_text()}",
+        )
         temp_count = len(snapshot.temperatures)
         temp_label = f"{temp_count} temperature sensor" + ("" if temp_count == 1 else "s")
-        self.temp_card.set(format_temp(snapshot.max_temp_c), temp_label)
+        self.temp_card.set(format_temp(snapshot.max_temp_c, metric=metric), temp_label)
 
         if update_session:
             self._append_log_entry(snapshot, ambient_f)
@@ -3633,7 +4194,8 @@ class HeatLensApp:
         direct_watts = sum(max(0.0, reading.value) for reading in snapshot.selected_power if not reading.estimated)
         estimated_watts = sum(max(0.0, reading.value) for reading in snapshot.selected_power if reading.estimated)
         selected_sources = "; ".join(
-            f"{reading.name}={reading.display_value()}" for reading in snapshot.selected_power
+            f"{reading.name}={reading.display_value(metric=self._use_metric())}"
+            for reading in snapshot.selected_power
         )
         notes = " | ".join(snapshot.notes)
         average_watts = self._average_watts()
@@ -3656,165 +4218,193 @@ class HeatLensApp:
         )
 
     def _power_rows(self, snapshot: HardwareSnapshot, ambient_f: Optional[float]) -> list[tuple[str, ...]]:
+        metric = self._use_metric()
         rows: list[tuple[str, ...]] = []
         rows.append(("Total wattage", format_watts(snapshot.total_watts), "Total", "Derived"))
-        rows.append(("Heat dissipation", format_btu_per_hour(snapshot.btu_per_hour), "Derived", "Derived"))
+        rows.append((
+            "Heat dissipation",
+            format_heat_dissipation(snapshot.total_watts, metric=metric),
+            "Derived",
+            "Derived",
+        ))
         rows.append(("Heat equivalent", heat_equivalent_label(snapshot.total_watts), "20-level", "Approximation"))
         if ambient_f is not None:
-            air_rise = still_air_rise_f_per_hour(snapshot.btu_per_hour, ambient_f)
-            cfm = airflow_for_exhaust_rise_cfm(snapshot.btu_per_hour, ambient_f)
             rows.append((
                 "Still-air rise",
-                f"+{air_rise:.1f} F/hr per {DEFAULT_ROOM_VOLUME_FT3:,.0f} ft3",
+                still_air_rise_display(snapshot.btu_per_hour, ambient_f, metric=metric),
                 "Ambient",
                 "No-loss estimate",
             ))
             rows.append((
                 "Cooling airflow",
-                f"{cfm:.0f} CFM for +{REFERENCE_EXHAUST_RISE_F:.0f} F exhaust",
+                airflow_display(snapshot.btu_per_hour, ambient_f, metric=metric),
                 "Ambient",
                 "HVAC estimate",
             ))
         else:
-            rows.append(("Ambient input", "Enter e.g. 72 or 22C", "", "Not used"))
+            ambient_hint = "Enter e.g. 22.0" if metric else "Enter e.g. 72.0"
+            rows.append(("Ambient input", ambient_hint, "", "Not used"))
         rows.append(("Session energy", format_kwh(self.session_wh / 1000.0), "Accumulated", "Derived"))
-        rows.append(("Session heat", format_btu(self.session_wh * WATTS_TO_BTU_PER_HOUR), "Derived", "Derived"))
+        if not metric:
+            rows.append((
+                "Session heat",
+                format_session_heat_display(self.session_wh, metric=False),
+                "Derived",
+                "Derived",
+            ))
         for reading in snapshot.power:
             used = "Yes" if reading.selected_for_total else ""
             if reading.estimated:
                 used = "Estimate"
-            rows.append((reading.name, reading.display_value(), used, display_source(reading)))
+            rows.append((reading.name, reading.display_value(metric=metric), used, display_source(reading)))
         return rows
 
     def _temperature_rows(self, snapshot: HardwareSnapshot, ambient_f: Optional[float]) -> list[tuple[str, str, str]]:
-        rows = [(reading.name, reading.display_value(), display_source(reading)) for reading in snapshot.temperatures]
+        metric = self._use_metric()
+        rows = [
+            (reading.name, reading.display_value(metric=metric), display_source(reading))
+            for reading in snapshot.temperatures
+        ]
         if snapshot.max_temp_c is not None:
             source = "Derived"
             if any(not reading.max_temperature_eligible for reading in snapshot.temperatures):
                 source = "Derived (Pascal-adjusted)"
-            rows.insert(0, ("Max temperature", format_temp(snapshot.max_temp_c), source))
+            rows.insert(0, ("Max temperature", format_temp(snapshot.max_temp_c, metric=metric), source))
             if ambient_f is not None:
                 ambient_c = fahrenheit_to_celsius(ambient_f)
-                rows.insert(1, ("Ambient air", format_temp_f_c(ambient_f), "User input"))
-                rows.insert(2, ("Max above ambient", format_temp_delta(snapshot.max_temp_c - ambient_c), "Derived"))
+                rows.insert(1, ("Ambient air", format_ambient_display(ambient_f, metric=metric), "User input"))
+                rows.insert(2, (
+                    "Max above ambient",
+                    format_temp_delta(snapshot.max_temp_c - ambient_c, metric=metric),
+                    "Derived",
+                ))
             else:
-                rows.insert(1, ("Ambient air", "Enter e.g. 72 or 22C", "Not used"))
+                ambient_hint = "Enter e.g. 22.0" if metric else "Enter e.g. 72.0"
+                rows.insert(1, ("Ambient air", ambient_hint, "Not used"))
         return rows
 
     def _status_note(self, snapshot: HardwareSnapshot, ambient_f: Optional[float]) -> str:
+        metric = self._use_metric()
         if ambient_f is None:
-            return "Enter ambient as Fahrenheit, or add C for Celsius, to unlock above-ambient and air-rise estimates."
+            if metric:
+                return "Enter ambient temperature in °C to unlock above-ambient and air-rise estimates."
+            return "Enter ambient temperature in °F to unlock above-ambient and air-rise estimates."
         if snapshot.notes:
             return snapshot.notes[0]
+        if metric:
+            return "kW equals electrical power. Almost all PC electrical power becomes room heat."
         return "BTU/hr = watts x 3.412. Almost all PC electrical power becomes room heat."
 
     def on_close(self) -> None:
         self.stop_event.set()
         self.root.after(50, self.root.destroy)
-def export_session_log_to_excel(
+
+
+def export_session_log(
     session_log: list[SessionLogEntry],
     output_path: str,
+    settings: ExportSettings,
+) -> None:
+    headers, rows = build_session_export_table(session_log, settings)
+    if settings.file_format == "csv":
+        export_session_log_to_csv(headers, rows, output_path, settings)
+    else:
+        export_session_log_to_excel(headers, rows, session_log, output_path, settings)
+
+
+def export_session_log_to_csv(
+    headers: list[str],
+    rows: list[list[object]],
+    output_path: str,
+    settings: ExportSettings,
+) -> None:
+    with open(output_path, "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle, delimiter=settings.csv_delimiter)
+        if settings.include_headers:
+            writer.writerow(headers)
+        for row in rows:
+            writer.writerow(["" if value is None else value for value in row])
+
+
+def export_session_log_to_excel(
+    headers: list[str],
+    rows: list[list[object]],
+    session_log: list[SessionLogEntry],
+    output_path: str,
+    settings: ExportSettings,
 ) -> None:
     from openpyxl import Workbook
     from openpyxl.styles import Font
     from openpyxl.utils import get_column_letter
 
     wb = Workbook()
-
-    # Main data sheet
     ws = wb.active
     ws.title = "HeatLens Log"
 
-    headers = [
-        "Timestamp",
-        "Elapsed Seconds",
-        "Total Watts",
-        "Direct Watts",
-        "Estimated Watts",
-        "Average kWh/hr",
-        "BTU/hr",
-        "Max Temp C",
-        "Ambient F",
-        "Heat Equivalent",
-        "Status",
-        "Selected Sources",
-        "Notes",
-    ]
+    if settings.include_headers:
+        ws.append(headers)
+        if settings.bold_headers:
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
 
-    ws.append(headers)
+    for row in rows:
+        ws.append(row)
 
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
+    if settings.auto_size_columns:
+        for column in ws.columns:
+            max_len = 0
+            column_letter = get_column_letter(column[0].column)
+            for cell in column:
+                try:
+                    max_len = max(max_len, len(str(cell.value)))
+                except Exception:
+                    pass
+            ws.column_dimensions[column_letter].width = min(max_len + 3, 60)
 
-    for entry in session_log:
-        ws.append([
-            entry.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-            round(entry.elapsed_seconds, 1),
-            round(entry.total_watts, 2),
-            round(entry.direct_watts, 2),
-            round(entry.estimated_watts, 2),
-            round(entry.average_kwh_per_hour, 4)
-                if entry.average_kwh_per_hour is not None else None,
-            round(entry.btu_per_hour, 2),
-            round(entry.max_temp_c, 2)
-                if entry.max_temp_c is not None else None,
-            round(entry.ambient_f, 2)
-                if entry.ambient_f is not None else None,
-            entry.heat_equivalent,
-            entry.status,
-            entry.selected_sources,
-            entry.notes,
-        ])
-
-    # Auto-size columns
-    for column in ws.columns:
-        max_len = 0
-        column_letter = get_column_letter(column[0].column)
-
-        for cell in column:
-            try:
-                max_len = max(max_len, len(str(cell.value)))
-            except Exception:
-                pass
-
-        ws.column_dimensions[column_letter].width = min(max_len + 3, 60)
-
-    # Summary sheet
-    summary = wb.create_sheet("Summary")
-
-    total_samples = len(session_log)
-    avg_watts = (
-        sum(e.total_watts for e in session_log) / total_samples
-        if total_samples else 0
-    )
-
-    peak_watts = max((e.total_watts for e in session_log), default=0)
-    peak_btu = max((e.btu_per_hour for e in session_log), default=0)
-
-    summary.append(["Metric", "Value"])
-    summary["A1"].font = Font(bold=True)
-    summary["B1"].font = Font(bold=True)
-
-    summary.append(["Samples Logged", total_samples])
-    summary.append(["Average Watts", round(avg_watts, 2)])
-    summary.append(["Peak Watts", round(peak_watts, 2)])
-    summary.append(["Peak BTU/hr", round(peak_btu, 2)])
-
-    if session_log:
-        duration_hours = (
-            session_log[-1].elapsed_seconds / 3600.0
+    if settings.include_summary:
+        summary = wb.create_sheet("Summary")
+        total_samples = len(session_log)
+        avg_watts = (
+            sum(entry.total_watts for entry in session_log) / total_samples
+            if total_samples else 0
         )
-        energy_kwh = (
-            sum(e.total_watts for e in session_log)
-            / total_samples
-            * duration_hours
-            / 1000.0
-        )
+        peak_watts = max((entry.total_watts for entry in session_log), default=0)
+        peak_btu = max((entry.btu_per_hour for entry in session_log), default=0)
 
-        summary.append(["Duration Hours", round(duration_hours, 3)])
-        summary.append(["Estimated Energy (kWh)", round(energy_kwh, 3)])
+        summary.append(["Metric", "Value"])
+        if settings.bold_headers:
+            summary["A1"].font = Font(bold=True)
+            summary["B1"].font = Font(bold=True)
+
+        summary.append(["Samples Logged", total_samples])
+        summary.append(["Average Watts", round(avg_watts, 2)])
+        summary.append(["Peak Watts", round(peak_watts, 2)])
+        summary.append(["Peak BTU/hr", round(peak_btu, 2)])
+
+        if session_log:
+            duration_hours = session_log[-1].elapsed_seconds / 3600.0
+            energy_kwh = (
+                sum(entry.total_watts for entry in session_log)
+                / total_samples
+                * duration_hours
+                / 1000.0
+            )
+            summary.append(["Duration Hours", round(duration_hours, 3)])
+            summary.append(["Estimated Energy (kWh)", round(energy_kwh, 3)])
+
+        if settings.auto_size_columns:
+            for column in summary.columns:
+                max_len = 0
+                column_letter = get_column_letter(column[0].column)
+                for cell in column:
+                    try:
+                        max_len = max(max_len, len(str(cell.value)))
+                    except Exception:
+                        pass
+                summary.column_dimensions[column_letter].width = min(max_len + 3, 60)
 
     wb.save(output_path)
+
 
 def configure_ttk_style() -> None:
     style = ttk.Style()
