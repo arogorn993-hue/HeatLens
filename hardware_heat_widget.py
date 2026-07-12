@@ -138,8 +138,6 @@ REFERENCE_EXHAUST_RISE_F = 10.0
 LIBRE_HARDWARE_MONITOR_DOWNLOAD_URL = (
     "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest"
 )
-# Optional tip link (Buy Me a Coffee, Ko-fi, etc.). Leave blank to hide the footer link.
-DONATE_URL = "https://buymeacoffee.com/arogorn993hue"
 
 
 HEAT_EQUIVALENTS: tuple[tuple[float, str], ...] = (
@@ -1539,10 +1537,6 @@ class LibreHardwareMonitorHelper:
     def open_download_page(self) -> None:
         webbrowser.open(LIBRE_HARDWARE_MONITOR_DOWNLOAD_URL)
 
-    def open_donate_page(self) -> None:
-        if DONATE_URL.strip():
-            webbrowser.open(DONATE_URL.strip())
-
     def maybe_prompt_on_startup(
         self,
         parent: tk.Misc,
@@ -2868,6 +2862,27 @@ class GraphPanel(tk.Frame):
         self._redraw_after_id: Optional[str] = None
         self._configure_after_id: Optional[str] = None
         self._redraw_interval_ms = GRAPH_REDRAW_INTERVAL_MS
+        # While the window is being dragged/resized, rendering is suspended so the heavy
+        # canvas redraw never runs on the main thread mid-drag (that caused drag stutter).
+        self._suspended = False
+        self._dirty = False
+
+    def suspend_rendering(self) -> None:
+        self._suspended = True
+        if self._configure_after_id is not None:
+            self.after_cancel(self._configure_after_id)
+            self._configure_after_id = None
+        if self._redraw_after_id is not None:
+            self.after_cancel(self._redraw_after_id)
+            self._redraw_after_id = None
+
+    def resume_rendering(self) -> None:
+        if not self._suspended:
+            return
+        self._suspended = False
+        if self._dirty:
+            self._dirty = False
+            self.redraw()
 
     def apply_options(
         self,
@@ -2899,6 +2914,9 @@ class GraphPanel(tk.Frame):
         self.schedule_redraw(force=True)
 
     def schedule_redraw(self, *, force: bool = False) -> None:
+        if self._suspended:
+            self._dirty = True
+            return
         if force:
             if self._redraw_after_id is not None:
                 self.after_cancel(self._redraw_after_id)
@@ -2990,6 +3008,9 @@ class GraphPanel(tk.Frame):
         self.schedule_redraw()
 
     def redraw(self) -> None:
+        if self._suspended:
+            self._dirty = True
+            return
         canvas = self.canvas
         canvas.delete("all")
         width = max(canvas.winfo_width(), 300)
@@ -3817,8 +3838,12 @@ class HeatLensApp:
         self.libre_helper = LibreHardwareMonitorHelper()
         self._ambient_entry_metric = False
 
+        self._interacting = False
+        self._interaction_after_id: Optional[str] = None
+
         configure_ttk_style()
         self._build_ui()
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
         self._apply_performance_options(initial=True)
         self._apply_units_option(initial=True)
         self._apply_graph_options()
@@ -3978,30 +4003,6 @@ class HeatLensApp:
             anchor="w",
         )
         self.note_label.grid(row=0, column=0, sticky="w")
-
-        if DONATE_URL.strip():
-            self.donate_label = tk.Label(
-                footer,
-                text="Buy me a coffee",
-                bg=COLORS["bg"],
-                fg=COLORS["subtle"],
-                font=("Segoe UI", 9, "underline"),
-                cursor="hand2",
-                anchor="e",
-            )
-            self.donate_label.grid(row=0, column=1, sticky="e", padx=(12, 0))
-            self.donate_label.bind(
-                "<Button-1>",
-                lambda _event: self.libre_helper.open_donate_page(),
-            )
-            self.donate_label.bind(
-                "<Enter>",
-                lambda _event: self.donate_label.configure(fg=COLORS["muted"]),
-            )
-            self.donate_label.bind(
-                "<Leave>",
-                lambda _event: self.donate_label.configure(fg=COLORS["subtle"]),
-            )
 
     def _setup_libre_hardware_monitor(self) -> None:
         self.libre_helper.prompt_manual_action(
@@ -4289,6 +4290,26 @@ class HeatLensApp:
             self.root.geometry("1060x720")
             self.compact_button.configure(text="Compact")
 
+    def _on_root_configure(self, event: object) -> None:
+        # Fires continuously while the window is dragged or resized. Suspend the heavy graph
+        # redraw and defer table/label refreshes until movement settles, so the window follows
+        # the cursor smoothly instead of stuttering (worst in Low impact mode).
+        if getattr(event, "widget", None) is not self.root:
+            return
+        if not self._interacting:
+            self._interacting = True
+            self.graph.suspend_rendering()
+        if self._interaction_after_id is not None:
+            self.root.after_cancel(self._interaction_after_id)
+        self._interaction_after_id = self.root.after(300, self._end_interaction)
+
+    def _end_interaction(self) -> None:
+        self._interaction_after_id = None
+        self._interacting = False
+        self.graph.resume_rendering()
+        if self._pending_display_snapshot is not None:
+            self._schedule_display_refresh()
+
     def _drain_queue(self) -> None:
         snapshots: list[HardwareSnapshot] = []
         while True:
@@ -4328,6 +4349,10 @@ class HeatLensApp:
 
     def _flush_display_refresh(self) -> None:
         self._ui_refresh_after_id = None
+        # Hold heavy label/table/graph work until the drag or resize settles.
+        if self._interacting:
+            self._ui_refresh_after_id = self.root.after(150, self._flush_display_refresh)
+            return
         snapshot = self._pending_display_snapshot
         if snapshot is None:
             return

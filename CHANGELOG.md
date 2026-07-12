@@ -2,6 +2,14 @@
 
 All notable changes to HeatLens are documented here.
 
+## [Unreleased]
+
+### Fixed
+- **Window drag/resize stutter**, most noticeable in **Low impact mode**: the graph now suspends its redraw and defers label/table refreshes while the window is being moved or resized, then catches up once movement settles
+
+### Removed
+- **"Buy me a coffee" footer link from the app** (the in-app footer label and `DONATE_URL`). Removed on purpose — I thought it was corny in the app itself. The link still lives on the GitHub page for anyone who wants it.
+
 ## [0.1.8] - 2026-07-10
 
 ### Added
