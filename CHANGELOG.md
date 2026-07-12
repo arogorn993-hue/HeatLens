@@ -2,6 +2,16 @@
 
 All notable changes to HeatLens are documented here.
 
+## [0.1.10] - 2026-07-12
+
+### Fixed
+- **Severe freeze on first load, especially when LibreHardwareMonitor is not running.** All LibreHardwareMonitor detection (process scan, Windows uninstall registry, OneDrive/Documents/Downloads/Desktop folder walks, and HTTP sensor probes) now runs on a background thread instead of the Tk main loop, so the window stays responsive and draggable while HeatLens looks for Libre. Previously this work ran on the UI thread at startup and again every 2 seconds during the "waiting for Libre" retry loop (up to 30 attempts), locking up the window and eventually reporting that it couldn't retrieve Libre.
+- The configured-port lookup is now cached, so the sensor-feed retry loop no longer re-scans the filesystem/registry on every probe.
+
+### Added
+- **Automatic detection of LibreHardwareMonitor's Remote Web Server port.** HeatLens now inspects the running Libre process and connects to whatever port it is actually listening on, so a **custom port works out of the box** — handy when another app (e.g. a game client) already occupies Libre's default port 8085. Falls back to the configured port and the usual defaults (8085/8086/8080).
+- **Option to run without LibreHardwareMonitor.** A new **Options → Sensors** toggle, "Don't use LibreHardwareMonitor (built-in sensors and estimates only)", skips Libre entirely and stops the startup prompt. The startup prompt also offers **Cancel = turn Libre off**, and when Libre is off the status bar clearly reads **"LibreHardwareMonitor is off"** instead of a "not connected" note. HeatLens continues to report wattage and heat from built-in sensors and estimates (psutil, nvidia-smi, RAPL/hwmon, etc.).
+
 ## [0.1.9] - 2026-07-11
 
 ### Fixed

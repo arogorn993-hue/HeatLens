@@ -28,7 +28,7 @@ from tkinter import filedialog, messagebox, ttk
 
 
 APP_NAME = "HeatLens"
-APP_VERSION = "0.1.9"
+APP_VERSION = "0.1.10"
 DEFAULT_POLL_INTERVAL_SECONDS = 3.0
 UI_REFRESH_INTERVAL_MS = 1000
 TABLE_REFRESH_INTERVAL_SECONDS = 5.0
@@ -51,6 +51,7 @@ POLL_INTERVAL_VALUES: dict[str, float] = {
 }
 PREF_POLL_INTERVAL = "poll_interval_seconds"
 PREF_LOW_IMPACT_MODE = "low_impact_mode"
+PREF_DISABLE_LIBRE = "disable_libre"
 GRAPH_X_WINDOW_LABELS: tuple[str, ...] = (
     "Auto",
     "1 minute",
@@ -706,6 +707,48 @@ def build_session_export_table(
     return headers, rows
 
 
+def discover_libre_listener_ports() -> list[int]:
+    """TCP ports that a running Libre/OpenHardwareMonitor process is listening on.
+
+    This is config- and install-location independent, so a custom Remote Web Server port is
+    found automatically even when Libre's default port (8085) is taken by another app. Best
+    effort: returns [] if psutil is unavailable or the process cannot be inspected.
+    """
+    exe_names = ("librehardwaremonitor.exe", "openhardwaremonitor.exe")
+    ports: list[int] = []
+    try:
+        import psutil
+    except Exception:
+        return ports
+    try:
+        proc_iter = psutil.process_iter(["name"])
+    except Exception:
+        return ports
+    for proc in proc_iter:
+        try:
+            name = str(proc.info.get("name") or "").lower()
+        except Exception:
+            continue
+        if name not in exe_names:
+            continue
+        try:
+            connections = proc.net_connections(kind="inet")
+        except Exception:
+            # AccessDenied (e.g. elevated Libre vs non-elevated HeatLens) or the process
+            # exited mid-scan — skip and fall back to configured/default ports.
+            continue
+        for conn in connections:
+            try:
+                if conn.status != psutil.CONN_LISTEN:
+                    continue
+                port = int(getattr(conn.laddr, "port", 0) or 0)
+            except Exception:
+                continue
+            if 0 < port <= 65535 and port not in ports:
+                ports.append(port)
+    return ports
+
+
 class LibreHardwareMonitorBackend:
     name = "Libre/Open Hardware Monitor"
 
@@ -778,7 +821,15 @@ class LibreHardwareMonitorBackend:
         configured_port = self._configured_http_port()
         if configured_port is not None:
             ports.append(configured_port)
-        ports.extend([8085, 8086, 8080])
+        # Detect the port a running Libre instance is actually listening on (covers custom
+        # web-server ports). Skip once a working URL is cached to avoid repeated scans.
+        if not self._cached_http_url:
+            for port in discover_libre_listener_ports():
+                if port not in ports:
+                    ports.append(port)
+        for port in (8085, 8086, 8080):
+            if port not in ports:
+                ports.append(port)
 
         unique_ports: list[int] = []
         for port in ports:
@@ -1129,6 +1180,27 @@ class LibreHardwareMonitorHelper:
 
     def is_windows(self) -> bool:
         return sys.platform == "win32"
+
+    def _detect_async(
+        self,
+        parent: tk.Misc,
+        work: Callable[[], object],
+        on_done: Callable[[object], None],
+    ) -> None:
+        # Runs blocking detection (process scan, registry, folder walks, HTTP probes) on a
+        # worker thread so the Tk main loop never freezes, then delivers the result back on
+        # the UI thread via after(). This is what keeps first-load smooth when Libre is off.
+        def worker() -> None:
+            try:
+                result = work()
+            except Exception:
+                result = None
+            try:
+                parent.after(0, lambda: on_done(result))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def sensor_feed_available(self) -> bool:
         for port in self._candidate_ports():
@@ -1490,49 +1562,59 @@ class LibreHardwareMonitorHelper:
         if wait_token != self._wait_token:
             return
 
-        if self.sensor_feed_available():
-            on_connected()
-            return
+        def probe() -> tuple[bool, bool]:
+            return (self.sensor_feed_available(), self.is_running())
 
-        if attempt == 0 and launch_if_needed and not self.is_running():
-            on_status("Starting LibreHardwareMonitor...")
-            if not self.launch(install_path):
+        def handle(result: object) -> None:
+            if wait_token != self._wait_token:
+                return
+            feed_available, running = result if result else (False, False)  # type: ignore[misc]
+
+            if feed_available:
+                on_connected()
+                return
+
+            if attempt == 0 and launch_if_needed and not running:
+                on_status("Starting LibreHardwareMonitor...")
+                if not self.launch(install_path):
+                    on_failed()
+                    return
+            elif attempt == 0 and running:
+                on_status("LibreHardwareMonitor is running — waiting for sensor feed...")
+
+            if attempt >= max_attempts:
                 on_failed()
                 return
-        elif attempt == 0 and self.is_running():
-            on_status("LibreHardwareMonitor is running — waiting for sensor feed...")
 
-        if attempt >= max_attempts:
-            on_failed()
-            return
+            if not running and attempt > 2:
+                on_status("LibreHardwareMonitor closed before sensors connected.")
+                on_failed()
+                return
 
-        if not self.is_running() and attempt > 2:
-            on_status("LibreHardwareMonitor closed before sensors connected.")
-            on_failed()
-            return
+            if running:
+                on_status(
+                    "Waiting for Libre sensors... enable Options -> Remote Web Server -> Run "
+                    f"({attempt + 1}/{max_attempts})"
+                )
+            else:
+                on_status(f"Waiting for LibreHardwareMonitor to start ({attempt + 1}/{max_attempts})")
 
-        if self.is_running():
-            on_status(
-                "Waiting for Libre sensors... enable Options -> Remote Web Server -> Run "
-                f"({attempt + 1}/{max_attempts})"
+            parent.after(
+                2000,
+                lambda: self._poll_sensor_feed_wait(
+                    parent,
+                    install_path,
+                    on_status=on_status,
+                    on_connected=on_connected,
+                    on_failed=on_failed,
+                    launch_if_needed=False,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                    wait_token=wait_token,
+                ),
             )
-        else:
-            on_status(f"Waiting for LibreHardwareMonitor to start ({attempt + 1}/{max_attempts})")
 
-        parent.after(
-            2000,
-            lambda: self._poll_sensor_feed_wait(
-                parent,
-                install_path,
-                on_status=on_status,
-                on_connected=on_connected,
-                on_failed=on_failed,
-                launch_if_needed=False,
-                attempt=attempt + 1,
-                max_attempts=max_attempts,
-                wait_token=wait_token,
-            ),
-        )
+        self._detect_async(parent, probe, handle)
 
     def open_download_page(self) -> None:
         webbrowser.open(LIBRE_HARDWARE_MONITOR_DOWNLOAD_URL)
@@ -1544,17 +1626,50 @@ class LibreHardwareMonitorHelper:
         on_status: Callable[[str], None],
         on_connected: Callable[[], None],
         on_failed: Callable[[], None],
+        on_disable: Optional[Callable[[], None]] = None,
     ) -> None:
         if not self.is_windows():
             return
         if self.preferences.get_bool("suppress_libre_setup_prompt"):
             return
-        if self.sensor_feed_available():
+        if self.preferences.get_bool(PREF_DISABLE_LIBRE):
             return
 
-        install_path = self.find_installation()
-        if install_path is not None:
-            if self.is_running():
+        def turn_off() -> None:
+            self.preferences.set_bool("suppress_libre_setup_prompt", True)
+            if on_disable is not None:
+                on_disable()
+
+        def detect() -> tuple[str, Optional[Path], bool]:
+            if self.sensor_feed_available():
+                return ("feed", None, False)
+            install_path = self.find_installation()
+            if install_path is None:
+                return ("not_installed", None, False)
+            return ("installed", install_path, self.is_running())
+
+        def done(result: object) -> None:
+            if not result:
+                return
+            kind, install_path, running = result  # type: ignore[misc]
+            if kind == "feed":
+                return
+            if kind == "not_installed":
+                response = messagebox.askyesnocancel(
+                    "Better sensor coverage",
+                    "LibreHardwareMonitor is not installed on this PC.\n\n"
+                    "HeatLens works without it, but Libre gives the best wattage and temperature "
+                    "coverage for CPU, GPU, motherboard, RAM, and NVMe.\n\n"
+                    "Open the download page?\n\n"
+                    "(Choose Cancel to turn Libre off — you can re-enable it in Options.)",
+                    parent=parent,
+                )
+                if response is None:
+                    turn_off()
+                elif response:
+                    self.open_download_page()
+                return
+            if running:
                 self.begin_sensor_feed_wait(
                     parent,
                     install_path,
@@ -1564,13 +1679,18 @@ class LibreHardwareMonitorHelper:
                     launch_if_needed=False,
                 )
                 return
-            if messagebox.askyesno(
+            answer = messagebox.askyesnocancel(
                 "Better sensor coverage",
                 "LibreHardwareMonitor is installed but not running.\n\n"
-                "HeatLens can use it for motherboard, CPU package, RAM, and storage sensors.\n\n"
-                "Start LibreHardwareMonitor now?",
+                "HeatLens can use it for motherboard, CPU package, RAM, and storage sensors, "
+                "but it also works fine without it using built-in estimates.\n\n"
+                "Start LibreHardwareMonitor now?\n\n"
+                "(Choose Cancel to turn Libre off — you can re-enable it in Options.)",
                 parent=parent,
-            ):
+            )
+            if answer is None:
+                turn_off()
+            elif answer:
                 self.begin_sensor_feed_wait(
                     parent,
                     install_path,
@@ -1579,20 +1699,8 @@ class LibreHardwareMonitorHelper:
                     on_failed=on_failed,
                     launch_if_needed=True,
                 )
-            return
 
-        response = messagebox.askyesnocancel(
-            "Better sensor coverage",
-            "LibreHardwareMonitor is not installed on this PC.\n\n"
-            "HeatLens works without it, but Libre gives the best wattage and temperature coverage "
-            "for CPU, GPU, motherboard, RAM, and NVMe.\n\n"
-            "Open the download page?",
-            parent=parent,
-        )
-        if response is None:
-            self.preferences.set_bool("suppress_libre_setup_prompt", True)
-        elif response:
-            self.open_download_page()
+        self._detect_async(parent, detect, done)
 
     def prompt_manual_action(
         self,
@@ -1611,48 +1719,60 @@ class LibreHardwareMonitorHelper:
             )
             return
 
-        if self.sensor_feed_available():
-            messagebox.showinfo(
-                "LibreHardwareMonitor",
-                "HeatLens is already receiving LibreHardwareMonitor sensor data.",
-                parent=parent,
-            )
-            return
+        on_status("Looking for LibreHardwareMonitor...")
 
-        install_path = self.find_installation()
-        if install_path is None:
+        def detect() -> tuple[str, Optional[Path], bool]:
+            if self.sensor_feed_available():
+                return ("feed", None, False)
+            install_path = self.find_installation()
+            if install_path is None:
+                return ("not_installed", None, False)
+            return ("installed", install_path, self.is_running())
+
+        def done(result: object) -> None:
+            if not result:
+                return
+            kind, install_path, running = result  # type: ignore[misc]
+            if kind == "feed":
+                messagebox.showinfo(
+                    "LibreHardwareMonitor",
+                    "HeatLens is already receiving LibreHardwareMonitor sensor data.",
+                    parent=parent,
+                )
+                return
+            if kind == "not_installed":
+                if messagebox.askyesno(
+                    "LibreHardwareMonitor",
+                    "LibreHardwareMonitor was not found on this PC.\n\nOpen the download page?",
+                    parent=parent,
+                ):
+                    self.open_download_page()
+                return
+            if running:
+                self.begin_sensor_feed_wait(
+                    parent,
+                    install_path,
+                    on_status=on_status,
+                    on_connected=on_connected,
+                    on_failed=on_failed,
+                    launch_if_needed=False,
+                )
+                return
             if messagebox.askyesno(
                 "LibreHardwareMonitor",
-                "LibreHardwareMonitor was not found on this PC.\n\nOpen the download page?",
+                f"Found LibreHardwareMonitor at:\n{install_path}\n\nStart it now?",
                 parent=parent,
             ):
-                self.open_download_page()
-            return
+                self.begin_sensor_feed_wait(
+                    parent,
+                    install_path,
+                    on_status=on_status,
+                    on_connected=on_connected,
+                    on_failed=on_failed,
+                    launch_if_needed=True,
+                )
 
-        if self.is_running():
-            self.begin_sensor_feed_wait(
-                parent,
-                install_path,
-                on_status=on_status,
-                on_connected=on_connected,
-                on_failed=on_failed,
-                launch_if_needed=False,
-            )
-            return
-
-        if messagebox.askyesno(
-            "LibreHardwareMonitor",
-            f"Found LibreHardwareMonitor at:\n{install_path}\n\nStart it now?",
-            parent=parent,
-        ):
-            self.begin_sensor_feed_wait(
-                parent,
-                install_path,
-                on_status=on_status,
-                on_connected=on_connected,
-                on_failed=on_failed,
-                launch_if_needed=True,
-            )
+        self._detect_async(parent, detect, done)
 
     def _prompt_enable_web_server(self, parent: tk.Misc) -> None:
         if self.sensor_feed_available():
@@ -1680,9 +1800,21 @@ class LibreHardwareMonitorHelper:
 
     def _candidate_ports(self) -> list[int]:
         ports: list[int] = []
-        configured = LibreHardwareMonitorBackend()._configured_http_port()
+        # Cache the configured-port lookup: it calls find_installation() (OneDrive/registry/
+        # process scans) which is expensive, and the sensor-feed probe runs it every 2s.
+        # The configured port doesn't change during a session; defaults are always probed.
+        configured = getattr(self, "_cached_configured_port", "unset")
+        if configured == "unset":
+            try:
+                configured = LibreHardwareMonitorBackend()._configured_http_port()
+            except Exception:
+                configured = None
+            self._cached_configured_port = configured
         if configured is not None:
             ports.append(configured)
+        for port in discover_libre_listener_ports():
+            if port not in ports:
+                ports.append(port)
         for port in (8085, 8086, 8080):
             if port not in ports:
                 ports.append(port)
@@ -2292,6 +2424,9 @@ class SensorCollector:
             PsutilEstimateBackend(),
         ]
         self._libre_http_active = False
+        # Set by the UI when the user opts out of LibreHardwareMonitor. Read on the poller
+        # thread; a plain bool is fine here (single writer, atomic reads in CPython).
+        self.disable_libre = False
 
     def sample(self) -> HardwareSnapshot:
         power: list[SensorReading] = []
@@ -2299,7 +2434,12 @@ class SensorCollector:
         estimates: list[SensorReading] = []
         notes: list[str] = []
 
+        if self.disable_libre:
+            self._libre_http_active = False
+
         for backend in self.backends:
+            if backend is self.libre_backend and self.disable_libre:
+                continue
             if self._should_skip_backend(backend):
                 continue
             try:
@@ -3397,6 +3537,41 @@ class OptionsWindow(tk.Toplevel):
 
         tk.Label(
             frame,
+            text="Sensors",
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 12, "bold"),
+            anchor="w",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        row += 1
+
+        ttk.Checkbutton(
+            frame,
+            text="Don't use LibreHardwareMonitor (built-in sensors and estimates only)",
+            variable=app.disable_libre,
+            command=app._apply_libre_option,
+            style="HeatLens.TCheckbutton",
+        ).grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
+        tk.Label(
+            frame,
+            text=(
+                "HeatLens works without LibreHardwareMonitor using built-in power sensors and "
+                "estimates. Turn this on to skip Libre entirely and stop the startup prompt. "
+                "Libre still gives the most complete coverage if you choose to use it."
+            ),
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+            wraplength=360,
+            justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 14))
+        row += 1
+
+        tk.Label(
+            frame,
             text="Units",
             bg=COLORS["bg"],
             fg=COLORS["text"],
@@ -3774,6 +3949,9 @@ class HeatLensApp:
         self.low_impact_mode = tk.BooleanVar(
             value=self.preferences.get_bool(PREF_LOW_IMPACT_MODE, False)
         )
+        self.disable_libre = tk.BooleanVar(
+            value=self.preferences.get_bool(PREF_DISABLE_LIBRE, False)
+        )
         self.poller = Poller(self.queue, self.stop_event, self._poll_interval_seconds)
         self._pending_display_snapshot: Optional[HardwareSnapshot] = None
         self._ui_refresh_after_id: Optional[str] = None
@@ -3845,6 +4023,7 @@ class HeatLensApp:
         self._build_ui()
         self.root.bind("<Configure>", self._on_root_configure, add="+")
         self._apply_performance_options(initial=True)
+        self._apply_libre_option(initial=True)
         self._apply_units_option(initial=True)
         self._apply_graph_options()
         self.poller.start()
@@ -3854,6 +4033,7 @@ class HeatLensApp:
             on_status=self._libre_status,
             on_connected=self._libre_connected,
             on_failed=self._libre_wait_failed,
+            on_disable=self._libre_opt_out,
         ))
 
     def _build_ui(self) -> None:
@@ -4024,8 +4204,19 @@ class HeatLensApp:
         )
 
     def _libre_wait_failed(self) -> None:
-        install_path = self.libre_helper.find_installation()
-        if install_path is not None and self.libre_helper.is_running():
+        def detect() -> tuple[Optional[Path], bool]:
+            install_path = self.libre_helper.find_installation()
+            running = self.libre_helper.is_running() if install_path is not None else False
+            return (install_path, running)
+
+        def done(result: object) -> None:
+            install_path, running = result if result else (None, False)  # type: ignore[misc]
+            self._libre_wait_failed_ui(install_path, running)
+
+        self.libre_helper._detect_async(self.root, detect, done)
+
+    def _libre_wait_failed_ui(self, install_path: Optional[Path], running: bool) -> None:
+        if install_path is not None and running:
             self.libre_helper._prompt_enable_web_server(self.root)
             self.libre_helper.begin_sensor_feed_wait(
                 self.root,
@@ -4117,6 +4308,28 @@ class HeatLensApp:
         self.graph.set_redraw_interval_ms(2000 if low_impact else GRAPH_REDRAW_INTERVAL_MS)
         if not initial and self._pending_display_snapshot is not None:
             self._schedule_display_refresh()
+
+    def _libre_opt_out(self) -> None:
+        # Called when the user chooses Cancel ("turn Libre off") on the startup prompt.
+        self.disable_libre.set(True)
+        self._apply_libre_option()
+
+    def _apply_libre_option(self, initial: bool = False) -> None:
+        disabled = self.disable_libre.get()
+        self.preferences.set_bool(PREF_DISABLE_LIBRE, disabled)
+        # Opting out also suppresses the startup prompt so HeatLens never nags about Libre.
+        if disabled:
+            self.preferences.set_bool("suppress_libre_setup_prompt", True)
+        self.poller.collector.disable_libre = disabled
+        if hasattr(self, "libre_button"):
+            self.libre_button.configure(state="disabled" if disabled else "normal")
+        if not initial:
+            if disabled:
+                self.status_label.configure(
+                    text="LibreHardwareMonitor disabled — using built-in sensors and estimates"
+                )
+            else:
+                self.status_label.configure(text="LibreHardwareMonitor enabled — click Libre to connect")
 
     def _export_settings(self) -> ExportSettings:
         return ExportSettings(
@@ -4550,6 +4763,8 @@ class HeatLensApp:
             if metric:
                 return "Enter ambient temperature in °C to unlock above-ambient and air-rise estimates."
             return "Enter ambient temperature in °F to unlock above-ambient and air-rise estimates."
+        if self.disable_libre.get():
+            return "LibreHardwareMonitor is off — using built-in sensors and estimates. Re-enable in Options."
         if snapshot.notes:
             return snapshot.notes[0]
         if metric:
